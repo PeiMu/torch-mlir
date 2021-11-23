@@ -479,3 +479,39 @@ class ElementwiseRsqrtModule(torch.nn.Module):
 @register_test_case(module_factory=lambda: ElementwiseRsqrtModule())
 def ElementwiseRsqrtModule_basic(module, tu: TestUtils):
     module.forward(tu.rand(3, 4))
+
+# ==============================================================================
+
+class ElementwiseAbsModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    @export
+    @annotate_args([
+        None,
+        ([-1], torch.float32, True),
+    ])
+
+    def forward(self, a):
+        return torch.abs(a)
+
+@register_test_case(module_factory=lambda: ElementwiseAbsModule())
+def ElementwiseAbsModule_basic(module, tu: TestUtils):
+    module.forward(torch.tensor([-1, -2, -3], dtype=torch.float32))
+
+# ==============================================================================
+
+class ElementwiseReciprocalModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    @export
+    @annotate_args([
+        None,
+        ([-1], torch.float32, True),
+    ])
+
+    def forward(self, a):
+        return torch.reciprocal(a)
+
+@register_test_case(module_factory=lambda: ElementwiseReciprocalModule())
+def ElementwiseReciprocalModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(4))

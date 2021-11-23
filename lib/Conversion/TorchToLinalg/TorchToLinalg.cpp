@@ -800,9 +800,7 @@ public:
 
     // Calculate squareSum for the layer.
     SmallVector<AffineMap> squareSumIndexingMaps{
-        inputShapeAffineMap,
-        meanAndVarShapeAffineMap,
-        meanAndVarShapeAffineMap,
+        inputShapeAffineMap, meanAndVarShapeAffineMap, meanAndVarShapeAffineMap,
     };
     auto initSquareSumTensor =
         createZeroInitTensor(rewriter, loc, meanAndVarShapeSizes, elemTy);
@@ -1222,8 +1220,7 @@ public:
           rewriter.getMultiDimIdentityMap(inputType.getRank())};
     } else {
       initTensor = rewriter.create<linalg::InitTensorOp>(
-          loc, ValueRange{inputDim0, weightDim0},
-          inputType.getElementType());
+          loc, ValueRange{inputDim0, weightDim0}, inputType.getElementType());
       transposedWeightInitTensor = rewriter.create<linalg::InitTensorOp>(
           loc, ValueRange{weightDim1, weightDim0}, weightType.getElementType());
       broadcastIndexingMaps = {
@@ -1594,6 +1591,30 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     Value result = convertScalarToDtype(b, loc, input, dtype);
     return result;
   }
+  if (isa<AtenAbsOp>(op))
+    return b.create<math::AbsOp>(loc, payloadArgs[0]);
+  if (auto reciprocal = dyn_cast<AtenReciprocalOp>(op)) {
+    if (!reciprocal.getType()
+             .cast<ValueTensorType>()
+             .getDtype()
+             .isa<mlir::FloatType>()) {
+      reciprocal.emitError("unimplemented: non-floating point dtype");
+      return nullptr;
+    }
+
+    Type elementType = payloadArgs[0].getType();
+    // assert(element != 0)
+    auto zero =
+        b.create<arith::ConstantOp>(loc, FloatAttr::get(elementType, 0.0));
+    auto pred = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::ONE,
+                                        payloadArgs[0], zero);
+    b.create<AssertOp>(
+        loc, pred, b.getStringAttr("unimplemented: tensor with zero element"));
+
+    auto one =
+        b.create<arith::ConstantOp>(loc, FloatAttr::get(elementType, 1.0));
+    return b.create<arith::DivFOp>(loc, one, payloadArgs[0]);
+  }
 
   op->emitError("unimplemented lowering in "
                 "createLinalgPayloadCalculationForElementwiseOp");
@@ -1743,9 +1764,8 @@ public:
         loc,
         ArrayRef<Type>({filledTensorIdx.getType(), filledTensorMax.getType()}),
         input, ValueRange({filledTensorIdx, filledTensorMax}), maps,
-        iteratorTypes,
-        [&](OpBuilder &nestedBuilder, Location nestedLoc,
-            ValueRange blockArgs) {
+        iteratorTypes, [&](OpBuilder &nestedBuilder, Location nestedLoc,
+                           ValueRange blockArgs) {
           Value newValue = blockArgs[0];
           Value oldIndex = blockArgs[1];
           Value oldValue = blockArgs[2];
@@ -1805,7 +1825,8 @@ struct ConvertElementwiseOp : ConversionPattern {
              AtenLerpTensorOp, AtenSigmoidOp, AtenExpOp, AtenMinimumOp,
              AtenMaximumOp, AtenToDtypeOp, AtenClampOp, AtenRsubScalarOp,
              AtenMulScalarOp, AtenLogOp, AtenSqrtOp, AtenFloorOp,
-             AtenPowTensorScalarOp, AtenLog2Op, AtenRsqrtOp>(op))
+             AtenPowTensorScalarOp, AtenLog2Op, AtenRsqrtOp, AtenAbsOp,
+             AtenReciprocalOp>(op))
       return rewriter.notifyMatchFailure(op, "not a supported elementwise op");
 
     if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
@@ -2648,8 +2669,7 @@ public:
         /*dimCount=*/resultRank,
         /*symbolCount=*/0, indicesExprs, op->getContext());
     SmallVector<AffineMap, 2> indexingMaps = {
-        indicesAffineMap,
-        rewriter.getMultiDimIdentityMap(resultRank),
+        indicesAffineMap, rewriter.getMultiDimIdentityMap(resultRank),
     };
     SmallVector<StringRef> iteratorTypes(sizes.size(),
                                          getParallelIteratorTypeName());
@@ -2762,9 +2782,8 @@ public:
         Value isValid = rewriter.create<arith::CmpIOp>(
             loc, arith::CmpIPredicate::sge, shapeValue, zero);
         rewriter.create<AssertOp>(
-            loc, isValid,
-            rewriter.getStringAttr(
-                "negative values not allowed in new dimensions"));
+            loc, isValid, rewriter.getStringAttr(
+                              "negative values not allowed in new dimensions"));
         outShape.push_back(castIntToIndex(rewriter, loc, shapeValue));
         continue;
       }
@@ -2955,12 +2974,13 @@ public:
     patterns.add<ConvertAtenLinearOp>(typeConverter, context);
     target.addIllegalOp<AtenBatchNormOp>();
     patterns.add<ConvertAtenBatchNormOp>(typeConverter, context);
-    target.addIllegalOp<
-        AtenTanhOp, AtenReluOp, AtenGeluOp, AtenGeluBackwardOp, AtenAddTensorOp,
-        AtenMulTensorOp, AtenDivTensorOp, AtenSubTensorOp, AtenLerpTensorOp,
-        AtenSigmoidOp, AtenMinimumOp, AtenMaximumOp, AtenToDtypeOp, AtenClampOp,
-        AtenRsubScalarOp, AtenLogOp, AtenSqrtOp, AtenFloorOp,
-        AtenPowTensorScalarOp, AtenLog2Op, AtenRsqrtOp>();
+    target.addIllegalOp<AtenTanhOp, AtenReluOp, AtenGeluOp, AtenGeluBackwardOp,
+                        AtenAddTensorOp, AtenMulTensorOp, AtenDivTensorOp,
+                        AtenSubTensorOp, AtenLerpTensorOp, AtenSigmoidOp,
+                        AtenMinimumOp, AtenMaximumOp, AtenToDtypeOp,
+                        AtenClampOp, AtenRsubScalarOp, AtenLogOp, AtenSqrtOp,
+                        AtenFloorOp, AtenPowTensorScalarOp, AtenLog2Op,
+                        AtenRsqrtOp, AtenAbsOp, AtenReciprocalOp>();
     patterns.add<ConvertElementwiseOp>(typeConverter, context);
     target.addIllegalOp<AtenUnsqueezeOp>();
     patterns.add<ConvertAtenUnsqueezeOp>(typeConverter, context);
