@@ -28,6 +28,40 @@ using namespace mlir::torch::Torch;
 // This is going to eventually be O(#torch operators), which is in the 100s.
 
 namespace {
+struct ConvertScalarOp : ConversionPattern {
+  ConvertScalarOp(TypeConverter &typeConverter, MLIRContext *context)
+          : ConversionPattern(typeConverter, MatchAnyOpTypeTag(), /*benefit=*/1,
+                              context) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<AtenAddIntOp>(op))
+      return rewriter.notifyMatchFailure(op, "not a supported elementwise op");
+
+    Location loc = op->getLoc();
+    auto resultType =
+            getTypeConverter()->convertType(op->getResult(0).getType());
+
+    if (auto addIntOp = dyn_cast<AtenAddIntOp>(op)) {
+      int64_t a, b;
+      if (!matchPattern(addIntOp.a(), m_TorchConstantInt(&a)))
+        return rewriter.notifyMatchFailure(op, "Add Int operand not constant.");
+      if (!matchPattern(addIntOp.b(), m_TorchConstantInt(&b)))
+        return rewriter.notifyMatchFailure(op, "Add Int operand not constant.");
+      Value lhs = rewriter.create<arith::ConstantOp>(
+              loc, rewriter.getI64IntegerAttr(a));
+      Value rhs = rewriter.create<arith::ConstantOp>(
+              loc, rewriter.getI64IntegerAttr(b));
+      rewriter.replaceOpWithNewOp<arith::AddIOp>(op, resultType, lhs, rhs);
+      return success();
+    }
+    return failure();
+  }
+};
+} // namespace
+
+namespace {
 // Note: Confusingly, ATen's "dim" means "number of dimensions" which is what
 // MLIR calls "rank".
 class ConvertAtenDimOp : public OpConversionPattern<AtenDimOp> {
@@ -129,6 +163,9 @@ public:
     target.addIllegalOp<Torch::ConstantIntOp>();
     patterns.add<ConvertTorchConstantOp<Torch::ConstantIntOp>>(typeConverter,
                                                                context);
+    target.addIllegalOp<AtenAddIntOp>();
+    patterns.add<ConvertScalarOp>(typeConverter, context);
+
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))
       return signalPassFailure();

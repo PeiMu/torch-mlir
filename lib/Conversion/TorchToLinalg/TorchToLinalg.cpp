@@ -2530,6 +2530,103 @@ public:
 } // namespace
 
 namespace {
+class ConvertAtenSliceTensorOp : public OpConversionPattern<AtenSliceTensorOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenSliceTensorOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+
+    Location loc = op.getLoc();
+    TypeConverter *typeConverter = getTypeConverter();
+
+    auto input = adaptor.self();
+    RankedTensorType inputType = input.getType().cast<RankedTensorType>();
+    RankedTensorType resultType =
+            typeConverter->convertType(op->getResult(0).getType())
+                    .cast<RankedTensorType>();
+    int64_t resultRank = resultType.getRank();
+    SmallVector<Value> resultShape;
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+
+    SmallVector<Value> offsets, strides;
+    strides.resize(inputType.getRank(), one);
+    offsets.resize(inputType.getRank(), zero);
+    Value end, start, stepIndex;
+    resultShape = getTensorSizes(rewriter, loc, input);
+    int64_t dim, step;
+    if (!matchPattern(adaptor.dim(), m_TorchConstantInt(&dim)))
+      return op->emitError("unimplemented: dim is not constant");
+    if (adaptor.start().getType().isa<Torch::NoneType>()) {
+      start = zero;
+    } else {
+      auto temp = castIndexToInt(rewriter, loc, resultShape[dim]);
+      Value startPositive = toPositiveDimDynamic(rewriter, loc, adaptor.start(), temp);
+      // start < 0 ? 0 : start
+      Value cst0 = rewriter.create<arith::ConstantOp>(
+              loc, rewriter.getZeroAttr(temp.getType()));
+      Value predDimSltZero = rewriter.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::slt, start, cst0);
+      Value startAtLeastZero = rewriter.create<SelectOp>(loc, predDimSltZero, startPositive, cst0);
+      start = castIntToIndex(rewriter, loc, startAtLeastZero);
+    }
+    if (adaptor.end().getType().isa<Torch::NoneType>()) {
+      end = resultShape[dim];
+    } else {
+      auto temp = castIndexToInt(rewriter, loc, resultShape[dim]);
+      end = toPositiveDimDynamic(rewriter, loc, adaptor.end(), temp);
+      end = castIntToIndex(rewriter, loc, end);
+    }
+    if (!matchPattern(adaptor.step(), m_TorchConstantInt(&step))) {
+      if (!adaptor.step().getType().isa<Torch::NoneType>())
+        return op->emitError("unimplemented: step is not constant");
+      step = 1;
+    }
+    Value endSgeStart = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::sge, end, start);
+    // TODO: Properly support case where end == start
+    rewriter.create<AssertOp>(
+            loc, endSgeStart,
+            rewriter.getStringAttr("end must be greater than start."));
+    // Slice logic: resultSize = floordiv(end - start + step - 1,  step)
+    stepIndex = rewriter.create<arith::ConstantIndexOp>(loc, step);
+    Value len = rewriter.create<arith::SubIOp>(loc, end, start);
+    Value resultSize = rewriter.create<arith::AddIOp>(loc, len, stepIndex);
+    resultSize = rewriter.create<arith::SubIOp>(loc, resultSize, one);
+    resultSize =
+            rewriter.create<arith::FloorDivSIOp>(loc, resultSize, stepIndex);
+    resultShape[dim] = resultSize;
+
+    offsets[dim] = start;
+    strides[dim] =
+            rewriter.create<arith::MulIOp>(loc, strides[dim], stepIndex);
+    Value result = rewriter.create<tensor::ExtractSliceOp>(
+            loc, input, offsets, resultShape, strides);
+
+    if (resultRank < inputType.getRank()) {
+      SmallVector<ReassociationIndices> reassociation(resultRank);
+      int64_t resultIdx = 0;
+      for (auto i : llvm::seq<int64_t>(0, inputType.getRank())) {
+        if (resultIdx < resultRank)
+          reassociation[resultIdx].push_back(i);
+        if (i != dim)
+          resultIdx++;
+      }
+      result = rewriter.create<linalg::TensorCollapseShapeOp>(loc, result,
+                                                              reassociation);
+    }
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, result);
+
+
+    return success();
+  }
+};
+} // namespace
+
+namespace {
 class ConvertAtenCatOp : public OpConversionPattern<AtenCatOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -3022,6 +3119,8 @@ public:
     patterns.add<ConvertAtenIntTensorOp>(typeConverter, context);
     target.addIllegalOp<PrimNumToTensorScalarOp>();
     patterns.add<ConvertPrimNumToTensorScalarOp>(typeConverter, context);
+    target.addIllegalOp<AtenSliceTensorOp>();
+    patterns.add<ConvertAtenSliceTensorOp>(typeConverter, context);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))

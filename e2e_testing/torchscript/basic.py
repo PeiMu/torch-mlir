@@ -666,3 +666,212 @@ class ReturnThreeTensorFloat32(torch.nn.Module):
 def ReturnThreeTensorFloat32_basic(module, tu: TestUtils):
     module.forward(tu.rand(2, 3), tu.rand(2, 3), tu.rand(2, 3))
 
+class SliceModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[0:5:1, 1:3:1, 2:4:1]
+
+
+@register_test_case(module_factory=lambda: SliceModule())
+def SliceModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,4,7))
+
+
+
+# ==============================================================================
+
+class SliceModuleLowStartIndex(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[-8:3:1, 1:3:1, 2:4:1]
+
+
+@register_test_case(module_factory=lambda: SliceModuleLowStartIndex())
+def SliceModuleLowStartIndex_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,4,7))
+
+# ==============================================================================
+
+class SliceModuleEndEqStart(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[:0, :0, :0]
+
+
+@register_test_case(module_factory=lambda: SliceModuleEndEqStart())
+def SliceModuleEndEqStart_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,4,7))
+
+# ==============================================================================
+
+class SliceModuleStartEqEnd(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[5:, :3, -1:]
+
+
+@register_test_case(module_factory=lambda: SliceModuleStartEqEnd())
+def SliceModuleStartEqEnd_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,4,7))
+
+# ==============================================================================
+
+class SliceModuleTwoStep(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[0:5:2, 0:3:2, 0:4:2]
+
+
+@register_test_case(module_factory=lambda: SliceModuleTwoStep())
+def SliceModuleTwoStep_basic(module, tu: TestUtils):
+    module.forward(tu.rand(10,5,17))
+
+# ==============================================================================
+
+class SliceModuleNegIdx(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[:-1, -2:-1]
+
+
+@register_test_case(module_factory=lambda: SliceModuleNegIdx())
+def SliceModuleNegIdx_basic(module, tu: TestUtils):
+    module.forward(tu.rand(3,9))
+
+# ==============================================================================
+
+class SliceModuleSingleIndex(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[0]
+
+
+@register_test_case(module_factory=lambda: SliceModuleSingleIndex())
+def SliceModuleSingleIndex_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,8))
+
+# ==============================================================================
+
+class SliceModuleWholeTensor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return x[:, :]
+
+
+@register_test_case(module_factory=lambda: SliceModuleWholeTensor())
+def SliceModuleWholeTensor_basic(module, tu: TestUtils):
+    module.forward(tu.rand(6,8))
+
+# ==============================================================================
+
+class SelectIntModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.long, True),
+    ])
+    def forward(self, x):
+        return x.select(0,0)
+
+
+@register_test_case(module_factory=lambda: SelectIntModule())
+def SelectIntModule_basic(module, tu: TestUtils):
+    module.forward(torch.tensor([[0,1,4,5],[3,4,5,6]], dtype=torch.long))
+
+# ==============================================================================
+
+class SelectIntAsSlice(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.long, True),
+    ])
+    def forward(self, x):
+        return x[0]
+
+
+@register_test_case(module_factory=lambda: SelectIntAsSlice())
+def SelectIntAsSlice_basic(module, tu: TestUtils):
+    module.forward(torch.tensor([[0,1,4,5],[3,4,5,6]], dtype=torch.long))
+
+# ==============================================================================
+
+class DropoutModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return torch.dropout(x, 0.0, False)
+
+
+@register_test_case(module_factory=lambda: DropoutModule())
+def DropoutModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(3, 4))
+

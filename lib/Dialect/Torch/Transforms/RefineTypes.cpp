@@ -224,16 +224,15 @@ public:
   visitOperation(Operation *op,
                  ArrayRef<LatticeElement<ValueKnowledge> *> operands) final {
     if (isa<TensorStaticInfoCastOp, CopyToValueTensorOp, CopyToNonValueTensorOp,
-            AtenTanhOp, AtenBatchNormOp, AtenReluOp, AtenGeluOp,
-            AtenGeluBackwardOp, AtenEqScalarOp, AtenGeScalarOp, AtenGtScalarOp,
-            AtenNeScalarOp, AtenBitwiseNotOp, AtenExpOp, AtenSinOp, AtenCosOp,
-            AtenSigmoidOp, DerefineOp, AtenToPrimDeviceOp, AtenCpuOp,
-            AtenContiguousOp, AtenFill_ScalarOp, AtenDetachOp,
-            AtenMaskedFill_ScalarOp, AtenCopy_Op, AtenIndexPut_Op, AtenCumsumOp,
-            AtenLayerNormOp, AtenClampOp, AtenLogOp, AtenSqrtOp, AtenFloorOp,
-            AtenLog2Op, Aten_SoftmaxBackwardDataOp, AtenRsqrtOp,
-            AtenTanhBackwardOp, Aten_LogSoftmaxBackwardDataOp, AtenAbsOp,
-            AtenReciprocalOp>(op)) {
+            AtenTanhOp, AtenBatchNormOp, AtenReluOp, AtenGeluOp, AtenEqScalarOp,
+            AtenGeScalarOp, AtenGtScalarOp, AtenNeScalarOp, AtenBitwiseNotOp,
+            AtenExpOp, AtenSinOp, AtenCosOp, AtenSigmoidOp, DerefineOp,
+            AtenToPrimDeviceOp, AtenCpuOp, AtenContiguousOp, AtenFill_ScalarOp,
+            AtenDetachOp, AtenMaskedFill_ScalarOp, AtenCopy_Op, AtenIndexPut_Op,
+            AtenCumsumOp, AtenLayerNormOp, AtenClampOp, AtenLogOp, AtenSqrtOp,
+            AtenFloorOp, AtenLog2Op, Aten_SoftmaxBackwardDataOp, AtenRsqrtOp,
+            AtenTanhBackwardOp, AtenAddIntOp,
+            Aten_LogSoftmaxBackwardDataOp>(op)) {
       return getLatticeElement(op->getResult(0)).join(*operands[0]);
     }
 
@@ -369,13 +368,11 @@ public:
       };
       return visitSliceLikeOp(indexSelect, operands, setDim);
     } else if (auto selectInt = dyn_cast<AtenSelectIntOp>(op)) {
-      // Select one element from the target dim. All the other dims are the same
-      // as input.
+      // Slices along dim at index. Result shape same as input except dim is
+      // removed.
       auto setDim = [](int64_t &targetDim, int64_t dim,
-                       ArrayRef<LatticeElement<ValueKnowledge> *> operands) {
-        targetDim = 1;
-      };
-      return visitSliceLikeOp(selectInt, operands, setDim);
+              ArrayRef<LatticeElement<ValueKnowledge> *> operands) {};
+      return visitSliceLikeOp(selectInt, operands, setDim, false);
     } else if (auto sliceTensor = dyn_cast<AtenSliceTensorOp>(op)) {
       // Select several elements from the target dim according to the start,
       // end, step. All the other dims are the same as input.
@@ -423,6 +420,8 @@ public:
       return visitAtenSoftmaxLikeOp(logSoftmaxIntOp, operands);
     } else if (auto numToTensorOp = dyn_cast<PrimNumToTensorScalarOp>(op)) {
       return visitNumToTensorOp(numToTensorOp);
+    } else if (auto scalarOp = dyn_cast<AtenAddIntOp>(op)) {
+      return visitScalarOp(scalarOp);
     }
 
     // Otherwise, this is an unknown operation. Just mark all results as
@@ -505,7 +504,7 @@ private:
   template <typename OpTy>
   ChangeResult
   visitSliceLikeOp(OpTy op, ArrayRef<LatticeElement<ValueKnowledge> *> operands,
-                   SetDimSizeFn setDim);
+                   SetDimSizeFn setDim, bool keepDim = true);
   ChangeResult
   visitAtenGatherOp(AtenGatherOp op,
                     ArrayRef<LatticeElement<ValueKnowledge> *> operands);
@@ -536,6 +535,7 @@ private:
   ChangeResult
   visitAtenSoftmaxLikeOp(OpTy op,
                         ArrayRef<LatticeElement<ValueKnowledge> *> operands);
+  template <typename OpTy> ChangeResult visitScalarOp(OpTy op);
 };
 } // namespace
 
@@ -574,6 +574,13 @@ static ResultTypeState updateResultTypeState(ValueKnowledge *tensor,
     new_state.zeroResult = promote_skip_undefined(inState.zeroResult, current);
 
   return new_state;
+}
+
+static Type getPromotedResultType(ArrayRef<Type> scalarTypes) {
+  ResultTypeState state = {};
+  for (const Type &scalarType : scalarTypes)
+    state = updateResultTypeState(scalarType, state);
+  return getTypeForScalarType(scalarTypes[0].getContext(), result_type(state));
 }
 
 // Returns most generic type Type() if the tensor dtype is unknown.
@@ -1063,6 +1070,13 @@ ChangeResult TypeAnalyzer::visitAtenPermuteOp(
   return getLatticeElement(op.getResult()).join(knowledge);
 }
 
+template <typename OpTy> ChangeResult TypeAnalyzer::visitScalarOp(OpTy op) {
+  auto knowledge =
+          ValueKnowledge::getNotNonePessimisticValueState(op.getContext());
+  knowledge.dtype = getPromotedResultType({op.a().getType(), op.b().getType()});
+  return getLatticeElement(op.getResult()).join(knowledge);
+}
+
 template <typename OpTy>
 ChangeResult TypeAnalyzer::visitScalarToTensorConversionOp(OpTy op) {
   auto knowledge =
@@ -1143,7 +1157,7 @@ ChangeResult TypeAnalyzer::visitTypeConversionOp(
 template <typename OpTy>
 ChangeResult TypeAnalyzer::visitSliceLikeOp(
     OpTy op, ArrayRef<LatticeElement<ValueKnowledge> *> operands,
-    SetDimSizeFn setDim) {
+    SetDimSizeFn setDim, bool keepDim) {
   auto input = operands[0]->getValue();
   auto knowledge =
       ValueKnowledge::getNotNonePessimisticValueState(op->getContext());
@@ -1169,6 +1183,8 @@ ChangeResult TypeAnalyzer::visitSliceLikeOp(
   }
   knowledge.sizes = input.sizes;
   setDim(knowledge.sizes[dim], dim, operands);
+  if (!keepDim)
+    knowledge.sizes.erase(knowledge.sizes.begin() + dim);
   return getLatticeElement(op.getResult()).join(knowledge);
 }
 
