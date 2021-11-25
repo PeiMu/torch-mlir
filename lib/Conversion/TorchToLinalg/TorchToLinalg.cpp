@@ -800,7 +800,9 @@ public:
 
     // Calculate squareSum for the layer.
     SmallVector<AffineMap> squareSumIndexingMaps{
-        inputShapeAffineMap, meanAndVarShapeAffineMap, meanAndVarShapeAffineMap,
+        inputShapeAffineMap,
+        meanAndVarShapeAffineMap,
+        meanAndVarShapeAffineMap,
     };
     auto initSquareSumTensor =
         createZeroInitTensor(rewriter, loc, meanAndVarShapeSizes, elemTy);
@@ -1220,7 +1222,8 @@ public:
           rewriter.getMultiDimIdentityMap(inputType.getRank())};
     } else {
       initTensor = rewriter.create<linalg::InitTensorOp>(
-          loc, ValueRange{inputDim0, weightDim0}, inputType.getElementType());
+          loc, ValueRange{inputDim0, weightDim0},
+          inputType.getElementType());
       transposedWeightInitTensor = rewriter.create<linalg::InitTensorOp>(
           loc, ValueRange{weightDim1, weightDim0}, weightType.getElementType());
       broadcastIndexingMaps = {
@@ -1764,8 +1767,9 @@ public:
         loc,
         ArrayRef<Type>({filledTensorIdx.getType(), filledTensorMax.getType()}),
         input, ValueRange({filledTensorIdx, filledTensorMax}), maps,
-        iteratorTypes, [&](OpBuilder &nestedBuilder, Location nestedLoc,
-                           ValueRange blockArgs) {
+        iteratorTypes,
+        [&](OpBuilder &nestedBuilder, Location nestedLoc,
+            ValueRange blockArgs) {
           Value newValue = blockArgs[0];
           Value oldIndex = blockArgs[1];
           Value oldValue = blockArgs[2];
@@ -2558,39 +2562,45 @@ public:
     Value end, start, stepIndex;
     resultShape = getTensorSizes(rewriter, loc, input);
     int64_t dim, step;
-    if (!matchPattern(adaptor.dim(), m_TorchConstantInt(&dim)))
+    if (!matchPattern(op.dim(), m_TorchConstantInt(&dim)))
       return op->emitError("unimplemented: dim is not constant");
-    if (adaptor.start().getType().isa<Torch::NoneType>()) {
+    if (op.start().getType().isa<Torch::NoneType>()) {
       start = zero;
     } else {
       auto temp = castIndexToInt(rewriter, loc, resultShape[dim]);
-      Value startPositive = toPositiveDimDynamic(rewriter, loc, adaptor.start(), temp);
-      // start < 0 ? 0 : start
-      Value cst0 = rewriter.create<arith::ConstantOp>(
-              loc, rewriter.getZeroAttr(temp.getType()));
-      Value predDimSltZero = rewriter.create<arith::CmpIOp>(
-              loc, arith::CmpIPredicate::slt, start, cst0);
-      Value startAtLeastZero = rewriter.create<SelectOp>(loc, predDimSltZero, startPositive, cst0);
-      start = castIntToIndex(rewriter, loc, startAtLeastZero);
+      start = toPositiveDimDynamic(rewriter, loc, adaptor.start(), temp);
+//      Value startPositive = toPositiveDimDynamic(rewriter, loc, adaptor.start(), temp);
+//      // start < 0 ? 0 : start
+//      Value cst0 = rewriter.create<arith::ConstantOp>(
+//              loc, rewriter.getZeroAttr(temp.getType()));
+//      Value predDimSltZero = rewriter.create<arith::CmpIOp>(
+//              loc, arith::CmpIPredicate::slt, op.start(), cst0);
+//      Value startAtLeastZero = rewriter.create<SelectOp>(loc, predDimSltZero, startPositive, cst0);
+//	    op->emitWarning("startAtLeastZero: \n");
+//      startAtLeastZero.dump();
+      start = castIntToIndex(rewriter, loc, start);
     }
-    if (adaptor.end().getType().isa<Torch::NoneType>()) {
+
+    if (op.end().getType().isa<Torch::NoneType>()) {
       end = resultShape[dim];
     } else {
       auto temp = castIndexToInt(rewriter, loc, resultShape[dim]);
       end = toPositiveDimDynamic(rewriter, loc, adaptor.end(), temp);
       end = castIntToIndex(rewriter, loc, end);
     }
-    if (!matchPattern(adaptor.step(), m_TorchConstantInt(&step))) {
-      if (!adaptor.step().getType().isa<Torch::NoneType>())
+
+    if (!matchPattern(op.step(), m_TorchConstantInt(&step))) {
+      if (!op.step().getType().isa<Torch::NoneType>())
         return op->emitError("unimplemented: step is not constant");
       step = 1;
     }
-    Value endSgeStart = rewriter.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::sge, end, start);
-    // TODO: Properly support case where end == start
-    rewriter.create<AssertOp>(
-            loc, endSgeStart,
-            rewriter.getStringAttr("end must be greater than start."));
+
+//    Value endSgeStart = rewriter.create<arith::CmpIOp>(
+//            loc, arith::CmpIPredicate::sge, op.end(), start);
+//    // TODO: Properly support case where end == start
+//    rewriter.create<AssertOp>(
+//            loc, endSgeStart,
+//            rewriter.getStringAttr("end must be greater than start."));
     // Slice logic: resultSize = floordiv(end - start + step - 1,  step)
     stepIndex = rewriter.create<arith::ConstantIndexOp>(loc, step);
     Value len = rewriter.create<arith::SubIOp>(loc, end, start);
