@@ -390,6 +390,7 @@ torch_mlir::derefineValues(c10::ArrayRef<MlirValue> values,
 MlirOperation
 torch_mlir::createOperationFromSchema(MlirBlock appendToBlock, MlirLocation loc,
                                       const c10::FunctionSchema &schema,
+                                      std::string externcall_name,
                                       c10::ArrayRef<MlirType> resultTypes,
                                       c10::ArrayRef<MlirValue> operands) {
   MlirContext context = mlirLocationGetContext(loc);
@@ -406,11 +407,24 @@ torch_mlir::createOperationFromSchema(MlirBlock appendToBlock, MlirLocation loc,
     opNameSuffix = opNameSuffix + "." + overloadName;
   }
   std::string opName = "torch." + opNameSuffix;
+  if (externcall_name != "")
+    opName += "." + externcall_name;
   // If we have a registered op, use it!
   if (mlirContextIsRegisteredOperation(context, toMlirStringRef(opName))) {
     return createMlirOperationAtEnd(appendToBlock, opName, loc, resultTypes,
                                     operands);
   }
+
+  // todo: pass down info about "_2xf32"
+  if (externcall_name != "") {
+    return createMlirOperationAtEnd(
+        appendToBlock, "torch.extern", loc, resultTypes, operands,
+        toMlirNamedAttribute(
+            "name", mlirStringAttrGet(
+                        context, toMlirStringRef(opNameSuffix + "." +
+                                                 externcall_name + "_2xf32"))));
+  }
+
   // Oops, no registered op -- create an opaque wrapper so that import can
   // still succeed. This helps a common use case of filling out registered ops
   // support, where it is easier to iterate on an MLIR file with

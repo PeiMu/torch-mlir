@@ -3275,6 +3275,118 @@ public:
 };
 } // namespace
 
+namespace {
+class ConvertExternOp : public OpConversionPattern<ExternOp> {
+public:
+	using OpConversionPattern::OpConversionPattern;
+	LogicalResult
+	matchAndRewrite(ExternOp op, OpAdaptor adaptor,
+								 ConversionPatternRewriter &rewriter) const override {
+		if (failed(verifyLinalgCompatibleTypes(op, rewriter))) {
+			op->emitError("uncompatible type");
+			return failure();
+		}
+		Location loc = op->getLoc();
+		MLIRContext *context = op->getContext();
+
+		StringAttr name = adaptor.name();
+		char *strName = (char*)name.data();
+		op->emitRemark("adaptor.name: ") << strName;
+		SmallVector<char *> nameParts;
+		const char *delim = ".";
+		char *p = strtok(strName, delim);
+		while (nullptr != p) {
+			nameParts.push_back(p);
+			p = strtok(nullptr, delim);
+		}
+
+		auto operands = adaptor.operands();
+		Value input = operands[1];
+
+//		Value input = adaptor.self();
+//
+		// for element-wise only
+//		RankedTensorType inputType = input.getType().cast<RankedTensorType>();
+//    op->emitRemark("inputType: ");
+//		inputType.dump();
+//		Type elementType = inputType.getElementType();
+//    op->emitRemark("elementType: ");
+//		elementType.dump();
+		Type elementType = mlir::FloatType::getF32(context);
+
+//		int64_t inputRank = inputType.getRank();
+    int64_t inputRank = 2;
+		SmallVector<Value> dimVec;
+		for (auto i : llvm::seq<int64_t>(0, inputRank))
+			dimVec.push_back(getDimOp(rewriter, loc, input, i));
+		Value initTensor = rewriter.create<linalg::InitTensorOp>(
+						loc, ValueRange(dimVec), elementType);
+
+		// indexing_maps
+		SmallVector<AffineMap> indexingMaps;
+		// inputs
+		for (auto i : llvm::seq<int64_t>(0, inputRank))
+			indexingMaps.push_back(rewriter.getMultiDimIdentityMap(inputRank));
+		// outputs
+		SmallVector<AffineExpr> indexMapsVec;
+		for (auto i : llvm::seq<int64_t>(0, inputRank))
+			indexMapsVec.push_back(mlir::getAffineDimExpr(i, context));
+		auto ncIndexingMap = AffineMap::get(
+						/*dimCount=*/inputRank,
+						/*symbolCount=*/0,
+						indexMapsVec,
+						context);
+		indexingMaps.push_back(ncIndexingMap);
+
+		// iterator_types
+		SmallVector<StringRef> iteratorTypes;
+		for (auto i : llvm::seq<int64_t>(0, inputRank))
+		  iteratorTypes.push_back("parallel");
+
+		// library_call
+		mlir::StringAttr libraryCallAttr = ::mlir::StringAttr::get(context, nameParts.back());
+		op->emitRemark("library call attr: ") << libraryCallAttr.str();
+
+		// linalg.generic
+		// /*libraryCallAttr*/libraryCallAttr
+    SmallVector<Value> inputs;
+		for (auto i : llvm::seq<int64_t>(0, inputRank))
+			inputs.push_back(operands[i+1]);
+
+		op->emitRemark("initTensor: ");
+		initTensor.getType().dump();
+		initTensor.dump();
+		op->emitRemark("inputs: ");
+		for (auto i : inputs) {
+			i.dump();
+		}
+		op->emitRemark("indexing maps: ");
+		for (auto i : indexingMaps) {
+			i.dump();
+		}
+		for (auto i : iteratorTypes) {
+			op->emitRemark("iterator types: ") << i.str();
+		}
+		Value result = rewriter.create<linalg::GenericOp>(
+						/*loc*/loc,
+						/*resultType*/initTensor.getType(),
+						/*inputOperands*/inputs,
+						/*outputOperands*/initTensor,
+						/*indexing_maps*/indexingMaps,
+						/*iteratorTypes*/iteratorTypes,
+						/*docAttr*/"",
+						/*libraryCallAttr*/libraryCallAttr,
+						/*bodyBuild*/[&](OpBuilder &b, Location loc, ValueRange args) {
+						  b.create<linalg::YieldOp>(loc, args[1]);
+						  }).getResult(0);
+		op->emitRemark("result: ");
+		result.dump();
+		rewriter.replaceOpWithNewOp<tensor::CastOp>(op, initTensor.getType(), result);
+		return success();
+	}
+};
+}
+
 // -----------------------------------------------------------------------------
 // The pass
 // -----------------------------------------------------------------------------
@@ -3372,6 +3484,8 @@ public:
     patterns.add<ConvertAtenNumelOp>(typeConverter, context);
     target.addIllegalOp<AtenSliceTensorOp>();
     patterns.add<ConvertAtenSliceTensorOp>(typeConverter, context);
+	  target.addIllegalOp<ExternOp>();
+	  patterns.add<ConvertExternOp>(typeConverter, context);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))

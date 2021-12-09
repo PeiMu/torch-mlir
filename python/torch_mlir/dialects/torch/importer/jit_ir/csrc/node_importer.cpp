@@ -99,8 +99,15 @@ void NodeImporter::importNode(Node *node, MlirBlock appendToBlock) {
   // Trivial ops with schema.
   auto maybeSchema = node->maybeSchema();
   if (maybeSchema) {
+    std::string externcall_name;
+    if (kind == at::prim::PythonOp){
+      auto* pyOp = static_cast<const ::torch::jit::PythonOp*>(node);
+      externcall_name = pyOp->name();
+    }
+
     MlirOperation operation =
         createOperationFromSchema(appendToBlock, loc, node->schema(),
+                                  externcall_name,
                                   getMlirTypesFromValues(loc, node->outputs()),
                                   lookupMappedValues(node->inputs()));
     mapResults(node, operation);

@@ -439,7 +439,7 @@ static LogicalResult verifyNnModuleValueUses(Value value) {
   if (!value.getType().isa<NnModuleType>())
     return success();
   for (Operation *op : value.getUsers()) {
-    if (isa<CallOp, PrimGetAttrOp>(op))
+    if (isa<CallOp, PrimGetAttrOp, ExternOp>(op))
       continue;
     // Only allow `value` as the receiver.
     if (isa<PrimSetAttrOp>(op) && cast<PrimSetAttrOp>(op).value() != value)
@@ -665,14 +665,14 @@ static LogicalResult globalizeObjectGraph(ModuleOp module) {
     module.push_back(newFunc);
   }
 
-  for (auto &kv : newFuncs) {
-    BlockAndValueMapping mapping;
-    if (failed(analyzeInstances(kv.second, kv.first.argInstances, mapping)))
-      return failure();
-    if (failed(rewriteMonomorphizedFuncClone(kv.second, mapping, symbolTable,
-                                             newFuncs, objectGraphInfo)))
-      return failure();
-  }
+//  for (auto &kv : newFuncs) {
+//    BlockAndValueMapping mapping;
+//    if (failed(analyzeInstances(kv.second, kv.first.argInstances, mapping)))
+//      return failure();
+//    if (failed(rewriteMonomorphizedFuncClone(kv.second, mapping, symbolTable,
+//                                             newFuncs, objectGraphInfo)))
+//      return failure();
+//  }
 
   // Step 5: Clean up object graph.
   DenseSet<FuncOp> liveFuncs;

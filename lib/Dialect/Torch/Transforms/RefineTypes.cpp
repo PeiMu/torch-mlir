@@ -247,6 +247,10 @@ public:
       return getLatticeElement(op->getResult(0)).join(*operands[0]);
     }
 
+    if (isa<ExternOp>(op)) {
+      return getLatticeElement(op->getResult(0)).join(*operands[1]);
+    }
+
     // Resize to [1, 1] with integer dtype.
     if (isa<AtenAnyOp, AtenAllOp>(op)) {
       auto input = operands[0]->getValue();

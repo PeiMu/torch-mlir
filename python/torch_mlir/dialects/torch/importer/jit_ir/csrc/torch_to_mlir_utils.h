@@ -73,6 +73,7 @@ std::vector<MlirValue> derefineValues(c10::ArrayRef<MlirValue> values,
 MlirOperation createOperationFromSchema(MlirBlock appendToBlock,
                                         MlirLocation loc,
                                         const c10::FunctionSchema &schema,
+                                        std::string externcall_name,
                                         c10::ArrayRef<MlirType> resultTypes,
                                         c10::ArrayRef<MlirValue> operands);
 

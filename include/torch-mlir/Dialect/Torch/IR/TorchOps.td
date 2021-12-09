@@ -687,6 +687,28 @@ def Torch_OperatorOp : Torch_Op<"operator", [
   }];
 }
 
+def Torch_ExternOp : Torch_Op<"extern", [
+    AllowsTypeRefinement,
+    HasValueSemantics
+  ]> {
+  let summary = "Opaque torch operator";
+  let description = [{
+    Represents an invocation of a `torch::jit::Operator` for which we don't
+    have a registered MLIR operation.
+
+    The `name` attribute contains the name that the MLIR op would have
+    (excluding `torch.`) if we did have it registered, which allows easy
+    cross referencing with `JITOperatorRegistryDump.txt`.
+  }];
+
+  let arguments = (ins StrAttr:$name, Variadic<AnyTorchType>:$operands);
+  let results = (outs Variadic<AnyTorchType>:$results);
+
+  let assemblyFormat = [{
+    $name `(` $operands `)` attr-dict `:` functional-type($operands, $results)
+  }];
+}
+
 def Torch_LinearParamsCreateOp : Torch_Op<"linear_params.create", [
     AllowsTypeRefinement
   ]> {
