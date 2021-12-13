@@ -556,14 +556,35 @@ rewriteMonomorphizedFuncClone(FuncOp func, BlockAndValueMapping mapping,
     toErase.push_back(op);
     return WalkResult::advance();
   };
-  auto walkResult = func.walk([&](Operation *op) {
+
+	auto handleExternOp = [&](ExternOp op) {
+		//FailureOr<Monomorphization> maybeMonomorphization =
+		//    createMonomorphizationForOperator(op, mapping, symbolTable);
+		//if (failed(maybeMonomorphization))
+		//  return WalkResult::interrupt();
+		//Monomorphization monomorphization = std::move(*maybeMonomorphization);
+		auto newArguments = llvm::to_vector<6>(
+						llvm::make_filter_range(op->getOperands(), [](Value v) {
+							return !v.getType().isa<NnModuleType>();
+						}));
+		//assert(newFuncs.find(monomorphization) != newFuncs.end());
+		auto newOp = OpBuilder(op).create<ExternOp>(
+						op.getLoc(),::mlir::TypeRange(op.results()), ::llvm::StringRef(op.name()), newArguments);
+		op.replaceAllUsesWith(newOp);
+		toErase.push_back(op);
+		return WalkResult::advance();
+	};
+
+	auto walkResult = func.walk([&](Operation *op) {
     if (auto primSetAttr = dyn_cast<PrimSetAttrOp>(op))
       return handlePrimSetAttr(primSetAttr);
     if (auto primGetAttr = dyn_cast<PrimGetAttrOp>(op))
       return handlePrimGetAttr(primGetAttr);
     if (auto call = dyn_cast<CallOp>(op))
       return handleCall(call);
-    return WalkResult::advance();
+		if (auto call = dyn_cast<ExternOp>(op))
+			return handleExternOp(call);
+		return WalkResult::advance();
   });
   for (auto op : toErase) {
     op->dropAllDefinedValueUses();
@@ -665,14 +686,14 @@ static LogicalResult globalizeObjectGraph(ModuleOp module) {
     module.push_back(newFunc);
   }
 
-//  for (auto &kv : newFuncs) {
-//    BlockAndValueMapping mapping;
-//    if (failed(analyzeInstances(kv.second, kv.first.argInstances, mapping)))
-//      return failure();
-//    if (failed(rewriteMonomorphizedFuncClone(kv.second, mapping, symbolTable,
-//                                             newFuncs, objectGraphInfo)))
-//      return failure();
-//  }
+  for (auto &kv : newFuncs) {
+    BlockAndValueMapping mapping;
+    if (failed(analyzeInstances(kv.second, kv.first.argInstances, mapping)))
+      return failure();
+    if (failed(rewriteMonomorphizedFuncClone(kv.second, mapping, symbolTable,
+                                             newFuncs, objectGraphInfo)))
+      return failure();
+  }
 
   // Step 5: Clean up object graph.
   DenseSet<FuncOp> liveFuncs;

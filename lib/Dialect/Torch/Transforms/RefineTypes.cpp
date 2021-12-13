@@ -248,7 +248,7 @@ public:
     }
 
     if (isa<ExternOp>(op)) {
-      return getLatticeElement(op->getResult(0)).join(*operands[1]);
+      return getLatticeElement(op->getResult(0)).join(*operands[0]);
     }
 
     // Resize to [1, 1] with integer dtype.

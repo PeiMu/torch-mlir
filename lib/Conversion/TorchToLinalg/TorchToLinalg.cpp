@@ -3351,7 +3351,7 @@ public:
 		// /*libraryCallAttr*/libraryCallAttr
     SmallVector<Value> inputs;
 		for (auto i : llvm::seq<int64_t>(0, inputRank))
-			inputs.push_back(operands[i+1]);
+			inputs.push_back(operands[i]);
 
 		op->emitRemark("initTensor: ");
 		initTensor.getType().dump();
