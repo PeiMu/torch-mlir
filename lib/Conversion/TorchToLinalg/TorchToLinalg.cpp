@@ -3301,7 +3301,7 @@ public:
 		}
 
 		auto operands = adaptor.operands();
-		Value input = operands[1];
+		Value input = operands[0];
 
 //		Value input = adaptor.self();
 //
@@ -3377,7 +3377,7 @@ public:
 						/*docAttr*/"",
 						/*libraryCallAttr*/libraryCallAttr,
 						/*bodyBuild*/[&](OpBuilder &b, Location loc, ValueRange args) {
-						  b.create<linalg::YieldOp>(loc, args[1]);
+						  b.create<linalg::YieldOp>(loc, args[2]);
 						  }).getResult(0);
 		op->emitRemark("result: ");
 		result.dump();

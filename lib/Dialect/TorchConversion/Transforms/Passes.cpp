@@ -62,15 +62,15 @@ void TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(
   pm.addNestedPass<FuncOp>(createConvertTorchToSCFPass());
   pm.addNestedPass<FuncOp>(createStdExpandOpsPass());
 
-//  if (options.optimize) {
-//    // Clean up any non-canonical code introduced above..
-//    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
-//    // Resolve `dim` ops on tensors (which currently live in the `memref`
-//    // dialect for some reason -- we don't have memrefs at this level).
-//    pm.addNestedPass<FuncOp>(memref::createResolveShapedTypeResultDimsPass());
-//    // The resolution of `dim` ops tends to create identical ops. CSE them.
-//    pm.addNestedPass<FuncOp>(createCSEPass());
-//  }
+  if (options.optimize) {
+    // Clean up any non-canonical code introduced above..
+    pm.addNestedPass<FuncOp>(createCanonicalizerPass());
+    // Resolve `dim` ops on tensors (which currently live in the `memref`
+    // dialect for some reason -- we don't have memrefs at this level).
+    pm.addNestedPass<FuncOp>(memref::createResolveShapedTypeResultDimsPass());
+    // The resolution of `dim` ops tends to create identical ops. CSE them.
+    pm.addNestedPass<FuncOp>(createCSEPass());
+  }
 
   // Finish the type conversion from `torch` types to the types of the
   // linalg-on-tensors backend contract.
