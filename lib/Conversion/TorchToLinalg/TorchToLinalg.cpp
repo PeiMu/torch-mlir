@@ -3275,146 +3275,146 @@ public:
 };
 } // namespace
 
-namespace {
-// for element-wise only
-class ConvertExternOp : public OpConversionPattern<ExternOp> {
-public:
-	using OpConversionPattern::OpConversionPattern;
-	LogicalResult
-	matchAndRewrite(ExternOp op, OpAdaptor adaptor,
-								 ConversionPatternRewriter &rewriter) const override {
-		if (failed(verifyLinalgCompatibleTypes(op, rewriter))) {
-			op->emitError("uncompatible type");
-			return failure();
-		}
-		Location loc = op->getLoc();
-		MLIRContext *context = op->getContext();
-
-		// get function name
-		StringAttr name = adaptor.name();
-		char *strName = (char*)name.data();
-		op->emitRemark("adaptor.name: ") << strName;
-		SmallVector<char *> nameParts;
-		const char *delim = ".";
-		char *p = strtok(strName, delim);
-		while (nullptr != p) {
-			nameParts.push_back(p);
-			p = strtok(nullptr, delim);
-		}
-
-		// get operand number
-		auto operands = adaptor.operands();
-    int64_t operandNum = 3;
-    assert(operands.size() == operandNum &&
-           "Operands number error!");
-    Value input = operands[0];
-
-    // get element type
-		Type elementType = mlir::FloatType::getF32(context);
-
-		// get rank
-    int64_t inputRank = 2;
-		SmallVector<Value> dimVec;
-		for (auto i : llvm::seq<int64_t>(0, inputRank))
-			dimVec.push_back(getDimOp(rewriter, loc, input, i));
-		Value initTensor = rewriter.create<linalg::InitTensorOp>(
-						loc, ValueRange(dimVec), elementType);
-
-		// indexing_maps
-		SmallVector<AffineMap> indexingMaps;
-		// inputs
-    for (auto i : llvm::seq<int64_t>(0, operandNum))
-      indexingMaps.push_back(
-          rewriter.getMultiDimIdentityMap(inputRank));
-    // outputs
-    SmallVector<AffineExpr> indexMapsVec;
-		for (auto i : llvm::seq<int64_t>(0, inputRank))
-			indexMapsVec.push_back(mlir::getAffineDimExpr(i, context));
-		auto ncIndexingMap = AffineMap::get(
-						/*dimCount=*/inputRank,
-						/*symbolCount=*/0,
-						indexMapsVec,
-						context);
-		indexingMaps.push_back(ncIndexingMap);
-
-		// iterator_types
-		SmallVector<StringRef> iteratorTypes;
-		for (auto i : llvm::seq<int64_t>(0, inputRank))
-		  iteratorTypes.push_back("parallel");
-
-		// library_call
-		mlir::StringAttr libraryCallAttr = ::mlir::StringAttr::get(context, nameParts.back());
-		op->emitRemark("library call attr: ") << libraryCallAttr.str();
-
-		// linalg.generic
-    SmallVector<Value> inputs;
-    for (auto i : llvm::seq<int64_t>(0, operandNum))
-      inputs.push_back(operands[i]);
-
-    op->emitRemark("initTensor: ");
-    initTensor.getType().dump();
-    initTensor.dump();
-    op->emitRemark("inputs: ");
-    for (auto i : inputs) {
-      i.dump();
-    }
-    op->emitRemark("indexing maps: ");
-    for (auto i : indexingMaps) {
-      i.dump();
-		}
-		for (auto i : iteratorTypes) {
-			op->emitRemark("iterator types: ") << i.str();
-		}
-
-		// private function operands type
-//		SmallVector<Type> privateFuncOperandTypes;
-//		for (auto i : llvm::seq<int64_t>(0, operandNum+1))
-//			privateFuncOperandTypes.push_back(elementType);
-//		SmallVector<Value> privateFuncOperand{inputs};
-//		privateFuncOperand.push_back(initTensor);
-
-//		// create the definition of function call
-//		auto funcType = rewriter.getFunctionType(privateFuncOperandTypes, {});
-//    rewriter.create<FuncOp>(loc,
-//    				libraryCallAttr.getValue(), funcType).setPrivate();
-    Value result =
-        rewriter
-            .create<linalg::GenericOp>(
-                /*loc*/ loc,
-                /*resultType*/ initTensor.getType(),
-                /*inputOperands*/ inputs,
-                /*outputOperands*/ initTensor,
-                /*indexing_maps*/ indexingMaps,
-                /*iteratorTypes*/ iteratorTypes,
-                /*docAttr*/ "",
-                /*libraryCallAttr*/ libraryCallAttr,
-                /*bodyBuild*/
-                [&](OpBuilder &b, Location loc, ValueRange args) {
-//                  b.create<mlir::CallOp>(loc,
-//                                         libraryCallAttr.getValue(),
-//                                         TypeRange({}), privateFuncOperand);
-                  Type idxType =
-                      mlir::IntegerType::get(context, 32);
-                  Value cst0 = b.create<arith::ConstantOp>(
-                      loc, b.getZeroAttr(idxType));
-                  Value falseValue = b.create<arith::CmpIOp>(
-                      loc, arith::CmpIPredicate::sgt, cst0, cst0);
-                  b.create<AssertOp>(
-                      loc, falseValue,
-                      b.getStringAttr(
-                          "cannot implement the bb0 in generic op "
-                          "with library call"));
-                  b.create<linalg::YieldOp>(loc, args[0]);
-                })
-            .getResult(0);
-    op->emitRemark("result: ");
-    result.dump();
-    rewriter.replaceOpWithNewOp<tensor::CastOp>(
-        op, initTensor.getType(), result);
-    return success();
-  }
-};
-}
+//namespace {
+//// for element-wise only
+//class ConvertExternOp : public OpConversionPattern<ExternOp> {
+//public:
+//	using OpConversionPattern::OpConversionPattern;
+//	LogicalResult
+//	matchAndRewrite(ExternOp op, OpAdaptor adaptor,
+//								 ConversionPatternRewriter &rewriter) const override {
+//		if (failed(verifyLinalgCompatibleTypes(op, rewriter))) {
+//			op->emitError("uncompatible type");
+//			return failure();
+//		}
+//		Location loc = op->getLoc();
+//		MLIRContext *context = op->getContext();
+//
+//		// get function name
+//		StringAttr name = adaptor.name();
+//		char *strName = (char*)name.data();
+//		op->emitRemark("adaptor.name: ") << strName;
+//		SmallVector<char *> nameParts;
+//		const char *delim = ".";
+//		char *p = strtok(strName, delim);
+//		while (nullptr != p) {
+//			nameParts.push_back(p);
+//			p = strtok(nullptr, delim);
+//		}
+//
+//		// get operand number
+//		auto operands = adaptor.operands();
+//    int64_t operandNum = 3;
+//    assert(operands.size() == operandNum &&
+//           "Operands number error!");
+//    Value input = operands[0];
+//
+//    // get element type
+//		Type elementType = mlir::FloatType::getF32(context);
+//
+//		// get rank
+//    int64_t inputRank = 2;
+//		SmallVector<Value> dimVec;
+//		for (auto i : llvm::seq<int64_t>(0, inputRank))
+//			dimVec.push_back(getDimOp(rewriter, loc, input, i));
+//		Value initTensor = rewriter.create<linalg::InitTensorOp>(
+//						loc, ValueRange(dimVec), elementType);
+//
+//		// indexing_maps
+//		SmallVector<AffineMap> indexingMaps;
+//		// inputs
+//    for (auto i : llvm::seq<int64_t>(0, operandNum))
+//      indexingMaps.push_back(
+//          rewriter.getMultiDimIdentityMap(inputRank));
+//    // outputs
+//    SmallVector<AffineExpr> indexMapsVec;
+//		for (auto i : llvm::seq<int64_t>(0, inputRank))
+//			indexMapsVec.push_back(mlir::getAffineDimExpr(i, context));
+//		auto ncIndexingMap = AffineMap::get(
+//						/*dimCount=*/inputRank,
+//						/*symbolCount=*/0,
+//						indexMapsVec,
+//						context);
+//		indexingMaps.push_back(ncIndexingMap);
+//
+//		// iterator_types
+//		SmallVector<StringRef> iteratorTypes;
+//		for (auto i : llvm::seq<int64_t>(0, inputRank))
+//		  iteratorTypes.push_back("parallel");
+//
+//		// library_call
+//		mlir::StringAttr libraryCallAttr = ::mlir::StringAttr::get(context, nameParts.back());
+//		op->emitRemark("library call attr: ") << libraryCallAttr.str();
+//
+//		// linalg.generic
+//    SmallVector<Value> inputs;
+//    for (auto i : llvm::seq<int64_t>(0, operandNum))
+//      inputs.push_back(operands[i]);
+//
+//    op->emitRemark("initTensor: ");
+//    initTensor.getType().dump();
+//    initTensor.dump();
+//    op->emitRemark("inputs: ");
+//    for (auto i : inputs) {
+//      i.dump();
+//    }
+//    op->emitRemark("indexing maps: ");
+//    for (auto i : indexingMaps) {
+//      i.dump();
+//		}
+//		for (auto i : iteratorTypes) {
+//			op->emitRemark("iterator types: ") << i.str();
+//		}
+//
+//		// private function operands type
+////		SmallVector<Type> privateFuncOperandTypes;
+////		for (auto i : llvm::seq<int64_t>(0, operandNum+1))
+////			privateFuncOperandTypes.push_back(elementType);
+////		SmallVector<Value> privateFuncOperand{inputs};
+////		privateFuncOperand.push_back(initTensor);
+//
+////		// create the definition of function call
+////		auto funcType = rewriter.getFunctionType(privateFuncOperandTypes, {});
+////    rewriter.create<FuncOp>(loc,
+////    				libraryCallAttr.getValue(), funcType).setPrivate();
+//    Value result =
+//        rewriter
+//            .create<linalg::GenericOp>(
+//                /*loc*/ loc,
+//                /*resultType*/ initTensor.getType(),
+//                /*inputOperands*/ inputs,
+//                /*outputOperands*/ initTensor,
+//                /*indexing_maps*/ indexingMaps,
+//                /*iteratorTypes*/ iteratorTypes,
+//                /*docAttr*/ "",
+//                /*libraryCallAttr*/ libraryCallAttr,
+//                /*bodyBuild*/
+//                [&](OpBuilder &b, Location loc, ValueRange args) {
+////                  b.create<mlir::CallOp>(loc,
+////                                         libraryCallAttr.getValue(),
+////                                         TypeRange({}), privateFuncOperand);
+//                  Type idxType =
+//                      mlir::IntegerType::get(context, 32);
+//                  Value cst0 = b.create<arith::ConstantOp>(
+//                      loc, b.getZeroAttr(idxType));
+//                  Value falseValue = b.create<arith::CmpIOp>(
+//                      loc, arith::CmpIPredicate::sgt, cst0, cst0);
+//                  b.create<AssertOp>(
+//                      loc, falseValue,
+//                      b.getStringAttr(
+//                          "cannot implement the bb0 in generic op "
+//                          "with library call"));
+//                  b.create<linalg::YieldOp>(loc, args[0]);
+//                })
+//            .getResult(0);
+//    op->emitRemark("result: ");
+//    result.dump();
+//    rewriter.replaceOpWithNewOp<tensor::CastOp>(
+//        op, initTensor.getType(), result);
+//    return success();
+//  }
+//};
+//}
 
 // -----------------------------------------------------------------------------
 // The pass
@@ -3513,8 +3513,8 @@ public:
     patterns.add<ConvertAtenNumelOp>(typeConverter, context);
     target.addIllegalOp<AtenSliceTensorOp>();
     patterns.add<ConvertAtenSliceTensorOp>(typeConverter, context);
-	  target.addIllegalOp<ExternOp>();
-	  patterns.add<ConvertExternOp>(typeConverter, context);
+//	  target.addIllegalOp<ExternOp>();
+//	  patterns.add<ConvertExternOp>(typeConverter, context);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))
