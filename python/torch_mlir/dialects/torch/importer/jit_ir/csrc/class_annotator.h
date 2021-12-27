@@ -176,6 +176,12 @@ public:
   MethodAnnotation *
   getMethodAnnotationForFunction(torch::jit::Function *function);
 
+  // get externcall info which is collected from jit.trace
+  std::tuple<int, int> getExterncallInfo(std::string funcName);
+
+  // set externcall info which is collected from jit.trace
+  void setExterncallInfo(py::dict externcallInfoArg);
+
   std::string toString();
 
 private:
@@ -188,6 +194,9 @@ private:
   // Reverse mapping used to service getMethodAnnotationForFunction.
   std::unordered_map<torch::jit::Function *, MethodAnnotation *>
       functionToMethodMap;
+  // a map contains externcall-name and the rank and type of its output(s)
+  // TODO move externcallInfo out of ClassAnnotator class
+  std::unordered_map<std::string, std::tuple<int, int>> externcallInfo;
 };
 
 void initClassAnnotatorBindings(py::module &m);

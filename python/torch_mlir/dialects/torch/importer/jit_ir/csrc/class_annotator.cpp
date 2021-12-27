@@ -252,6 +252,17 @@ ClassAnnotator::getMethodAnnotationForFunction(torch::jit::Function *function) {
   return it->second;
 }
 
+std::tuple<int, int> ClassAnnotator::getExterncallInfo(std::string funcName) {
+  return externcallInfo[funcName];
+}
+
+void ClassAnnotator::setExterncallInfo(py::dict externcallInfoArg) {
+  for (auto item : externcallInfoArg)
+    externcallInfo[std::string(py::str(item.first))] =
+        item.second.cast<std::tuple<int, int>>();
+  return;
+}
+
 //===----------------------------------------------------------------------===//
 // toString methods
 //===----------------------------------------------------------------------===//
@@ -338,5 +349,6 @@ void torch_mlir::initClassAnnotatorBindings(py::module &m) {
       .def("exportPath", &ClassAnnotator::exportPath)
       .def("exportNone", &ClassAnnotator::exportNone)
       .def("annotateArgs", &ClassAnnotator::annotateArgs)
+      .def("setExterncallInfo", &ClassAnnotator::setExterncallInfo)
       .def("__repr__", &ClassAnnotator::toString);
 }

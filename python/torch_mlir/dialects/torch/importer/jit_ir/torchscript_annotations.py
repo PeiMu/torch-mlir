@@ -51,7 +51,9 @@ def _recursively_extract_annotations(
 
 def extract_annotations(program: torch.nn.Module,
                         scripted: torch.jit.ScriptModule,
-                        class_annotator: ClassAnnotator):
+                        class_annotator: ClassAnnotator,
+                        externcall_info):
     """Populate the ClassAnnotator with annotations extracted from `program`."""
     class_annotator.exportNone(scripted._c._type())
+    class_annotator.setExterncallInfo(externcall_info)
     _recursively_extract_annotations(program, scripted, class_annotator)

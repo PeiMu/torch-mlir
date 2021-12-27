@@ -10,10 +10,13 @@
 #include "ivalue_importer.h"
 #include "class_annotator.h"
 #include "function_importer.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchTypes.h"
 #include "torch_to_mlir_utils.h"
 
 #include <unordered_map>
 
+#include "mlir/IR/Operation.h"
 #include "mlir_utils.h"
 
 #include "mlir-c/BuiltinAttributes.h"
@@ -542,6 +545,28 @@ void IValueImporter::importCompilationUnit(torch::jit::CompilationUnit *cu) {
               "torch.type_bound", mlirTypeAttrGet(typeBound));
           return mlirDictionaryAttrGet(context, 1, &typeBoundAttr);
         });
+
+    // add the rank of output for torch.extern
+    static_cast<mlir::Operation *>(func.ptr)->walk([&](mlir::Operation *op) {
+      if (op->getName().getIdentifier().str() == "torch.extern") {
+        auto callName =
+            op->getAttr("name").dyn_cast_or_null<mlir::StringAttr>();
+        assert(callName && callName.str().length() > 14 &&
+               callName.str().substr(0, 13) == "prim.PythonOp" &&
+               "torch.extern only supports prim.PythonOp.xxxx");
+        std::vector<int64_t> shape(
+            std::get<0>(annotator.getExterncallInfo(callName.str().substr(14))),
+            static_cast<int64_t>(-1));
+        auto resultType = (*op->result_type_begin())
+                              .dyn_cast<mlir::torch::Torch::BaseTensorType>();
+        op->getResult(0).setType(resultType.getWithSizesAndDtype(
+            llvm::makeArrayRef(shape),
+            mlir::FloatType::getF32(
+                static_cast<mlir::MLIRContext *>(context.ptr))));
+      }
+      return mlir::WalkResult::advance();
+    });
+
     // For IValue importing, the logical linkage structure of the module
     // is determined by the object graph.
     //

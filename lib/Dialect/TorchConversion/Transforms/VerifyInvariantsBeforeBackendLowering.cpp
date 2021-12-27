@@ -55,7 +55,6 @@ class VerifyInvariantsBeforeBackendLoweringPass
         }
       }
       for (Operation &op : *block) {
-        // todo: note it?
         if (isa<Torch::OperatorOp>(op)) {
           op.emitError()
               .append("unsupported by backend lowering: `torch.operator` op")
