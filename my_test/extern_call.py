@@ -41,7 +41,7 @@ class ExternCallModule(torch.nn.Module):
     ])
     def forward(self, x, y, z):
         tmp = self.external_function(x, y, z)
-        return tmp
+        return tmp + x
         # return self.external_function(x, y, z)
 
 

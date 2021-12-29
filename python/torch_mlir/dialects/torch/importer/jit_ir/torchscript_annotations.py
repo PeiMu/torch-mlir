@@ -10,6 +10,7 @@ import torch
 import torch_mlir
 from torch_mlir.dialects.torch.importer.jit_ir import ClassAnnotator
 
+
 # Decorators
 
 # Currently, these decorators are very low-level and map 1:1 with
@@ -28,8 +29,8 @@ def _recursively_extract_annotations(
         module: torch.nn.Module, scripted: torch.jit.ScriptModule,
         class_annotator: ClassAnnotator):
     assert module.__class__.__name__ == scripted.original_name or (
-        isinstance(module, torch.jit.RecursiveScriptModule) and module is
-        scripted), "script module does not come from specified module"
+            isinstance(module, torch.jit.RecursiveScriptModule) and module is
+            scripted), "script module does not come from specified module"
 
     # Extract information on methods.
     for method_name, scripted_method in scripted.__dict__.items():
@@ -52,8 +53,9 @@ def _recursively_extract_annotations(
 def extract_annotations(program: torch.nn.Module,
                         scripted: torch.jit.ScriptModule,
                         class_annotator: ClassAnnotator,
-                        externcall_info):
+                        externcall_info=None):
     """Populate the ClassAnnotator with annotations extracted from `program`."""
     class_annotator.exportNone(scripted._c._type())
-    class_annotator.setExterncallInfo(externcall_info)
+    if externcall_info is not None:
+        class_annotator.setExterncallInfo(externcall_info)
     _recursively_extract_annotations(program, scripted, class_annotator)
