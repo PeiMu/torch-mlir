@@ -18,6 +18,8 @@
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/BackendTypeConversion.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 
 using namespace mlir;
 using namespace mlir::torch;
@@ -242,12 +244,17 @@ struct FinalizingBackendTypeConversionPass
       FinalizingBackendTypeConversionPass>::FinalizingBackendTypeConversionBase;
 
   void runOnOperation() override {
-    auto func = getOperation();
+	  Operation *func = getOperation();
     auto *context = &getContext();
+
+//    func->emitRemark("-----------FinalizingBackendTypeConversionPass-----------");
 
     TypeConverter typeConverter;
     RewritePatternSet patterns(context);
     ConversionTarget target(*context);
+
+//	  target.addLegalDialect<Torch::TorchDialect>();
+//	  target.addLegalOp<Torch::ExternOp>();
 
     typeConverter.addConversion([](Type type) { return type; });
     TorchConversion::setupBackendTypeConversion(target, typeConverter);
@@ -266,7 +273,10 @@ struct FinalizingBackendTypeConversionPass
     // the types of the operands to a return op without updating the enclosing
     // function.
     target.markUnknownOpDynamicallyLegal(
-        [&](Operation *op) { return typeConverter.isLegal(op); });
+        [&](Operation *op) {
+//        	op->emitRemark("---------markUnknownOpDynamicallyLegal---------");
+        	return typeConverter.isLegal(op);
+        });
 
     if (failed(applyFullConversion(func, target, std::move(patterns))))
       signalPassFailure();

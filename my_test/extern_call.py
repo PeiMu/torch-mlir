@@ -35,13 +35,15 @@ class ExternCallModule(torch.nn.Module):
     @export
     @annotate_args([
         None,
-        ([1024, 4], torch.float32, True),
-        ([1024, 4], torch.float32, True),
-        ([1024, 4], torch.float32, True),
+        ([2, 3], torch.float32, True),
+        ([2, 3], torch.float32, True),
+        ([2, 3], torch.float32, True),
     ])
     def forward(self, x, y, z):
+        x = x + y
         tmp = self.external_function(x, y, z)
-        return tmp + x
+        res = tmp - y
+        return res + x
         # return self.external_function(x, y, z)
 
 
@@ -120,8 +122,8 @@ if __name__ == '__main__':
     # Loads the compiled artifact into the runtime
     jit_module = BACKEND.load(compiled)
     # Run it!
-    x = torch.rand(5, 3).numpy()
-    y = torch.rand(5, 3).numpy()
-    z = torch.rand(5, 3).numpy()
+    x = torch.rand(2, 3).numpy()
+    y = torch.rand(2, 3).numpy()
+    z = torch.rand(2, 3).numpy()
     print("x: ", x, "\ny: ", y, "\nz: ", z)
     print("\n\n result: ", jit_module.forward(x, y, z))

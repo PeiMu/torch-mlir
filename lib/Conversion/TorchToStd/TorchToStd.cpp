@@ -110,95 +110,95 @@ public:
   matchAndRewrite(ExternOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     op.emitRemark("in convert extern op");
-	  Location loc = op->getLoc();
-		MLIRContext *context = op->getContext();
+    Location loc = op->getLoc();
+    MLIRContext *context = op->getContext();
 
-	  // get element type
-	  Type elementType = mlir::FloatType::getF32(context);
+    // get element type
+    Type elementType = mlir::FloatType::getF32(context);
 
-	  // get rank
-	  int64_t inputRank = 2;
+    // get rank
+    int64_t inputRank = 2;
 
-	  // get operand number
-	  int64_t operandNum = 3;
+    // get operand number
+    int64_t operandNum = 3;
 
     // get function name
-		StringAttr name = adaptor.name();
-		char *strName = (char*)name.data();
-		op->emitRemark("adaptor.name: ") << strName;
-		SmallVector<char *> nameParts;
-		const char *delim = ".";
-		char *p = strtok(strName, delim);
-		while (nullptr != p) {
-			nameParts.push_back(p);
-			p = strtok(nullptr, delim);
-		}
-	  mlir::StringAttr libraryCallAttr = ::mlir::StringAttr::get(context, nameParts.back());
-		op->emitRemark("library call attr: ") << libraryCallAttr;
+    StringAttr name = adaptor.name();
+    char *strName = (char *)name.data();
+    op->emitRemark("adaptor.name: ") << strName;
+    SmallVector<char *> nameParts;
+    const char *delim = ".";
+    char *p = strtok(strName, delim);
+    while (nullptr != p) {
+      nameParts.push_back(p);
+      p = strtok(nullptr, delim);
+    }
+    mlir::StringAttr libraryCallAttr =
+        ::mlir::StringAttr::get(context, nameParts.back());
+    op->emitRemark("library call attr: ") << libraryCallAttr;
 
-		// get inputs
-	  auto operands = adaptor.operands();
-	  assert(operands.size() == operandNum && "Operand number error!");
-	  Value input = operands[0];
-//	  SmallVector<Value> inputs;
-//    for (auto i : llvm::seq<int64_t>(0, operandNum))
-//      inputs.push_back(operands[i]);
+    // get inputs
+    auto operands = adaptor.operands();
+    assert(operands.size() == operandNum && "Operand number error!");
+    Value input = operands[0];
+    //	  SmallVector<Value> inputs;
+    //    for (auto i : llvm::seq<int64_t>(0, operandNum))
+    //      inputs.push_back(operands[i]);
 
     // get result number
     int64_t resultNum = 1;
 
     // create type canonicalized memref operands
     SmallVector<Value, 4> callOperands;
-	  callOperands.reserve(operands.size());
+    callOperands.reserve(operands.size());
 
-	  // inputs operands
-	  for (auto op : operands) {
-//	  	auto tensorType = op.getType().dyn_cast<TensorType>();
-//	  	if (!tensorType) {
-//			  callOperands.push_back(op);
-//	  		continue;
-//	  	}
-//	  	Value cast = rewriter.create<tensor::CastOp>(loc, tensorType, op);
-//		  callOperands.push_back(cast);
-		  callOperands.push_back(op);
-	  }
+    // inputs operands
+    for (auto op : operands) {
+      //	  	auto tensorType = op.getType().dyn_cast<TensorType>();
+      //	  	if (!tensorType) {
+      //			  callOperands.push_back(op);
+      //	  		continue;
+      //	  	}
+      //	  	Value cast = rewriter.create<tensor::CastOp>(loc,
+      //tensorType, op); 		  callOperands.push_back(cast);
+      callOperands.push_back(op);
+    }
 
-	  op->emitRemark("call operands: ");
-	  for (auto v : callOperands) {
-	  	v.dump();
-	  }
+    op->emitRemark("call operands: ");
+    for (auto v : callOperands) {
+      v.dump();
+    }
 
-	  // get function FuncOp
-	  auto module = op->getParentOfType<ModuleOp>();
-	  if (!module.lookupSymbol(libraryCallAttr)) {
-		  // func input types
-		  SmallVector<Type, 4> inputTypes;
-		  inputTypes.reserve(operandNum);
-		  for (auto operand : operands) {
-		  	auto operandType = operand.getType();
-			  inputTypes.push_back(operandType);
-			  op->emitRemark("operandType");
-			  operandType.dump();
-		  }
-		  // func output types
-		  Type outputType = input.getType();
-		  auto libFnType = rewriter.getFunctionType(inputTypes, outputType);
+    // get function FuncOp
+    auto module = op->getParentOfType<ModuleOp>();
+    if (!module.lookupSymbol(libraryCallAttr)) {
+      // func input types
+      SmallVector<Type, 4> inputTypes;
+      inputTypes.reserve(operandNum);
+      for (auto operand : operands) {
+        auto operandType = operand.getType();
+        inputTypes.push_back(operandType);
+        op->emitRemark("operandType");
+        operandType.dump();
+      }
+      // func output types
+      Type outputType = input.getType();
+      auto libFnType = rewriter.getFunctionType(inputTypes, outputType);
 
-		  OpBuilder::InsertionGuard guard(rewriter);
-		  // insert before module terminator.
-		  rewriter.setInsertionPoint(module.getBody(),
-															   std::prev(module.getBody()->end()));
-		  FuncOp funcOp = rewriter.create<FuncOp>(loc, libraryCallAttr, libFnType);
-		  funcOp->setAttr("llvm.emit_c_interface", UnitAttr::get(op->getContext()));
-		  funcOp.setPrivate();
-		  op->emitRemark("func op");
-		  funcOp.dump();
-	  }
+      OpBuilder::InsertionGuard guard(rewriter);
+      // insert before module terminator.
+      rewriter.setInsertionPoint(module.getBody(),
+                                 std::prev(module.getBody()->end()));
+      FuncOp funcOp = rewriter.create<FuncOp>(loc, libraryCallAttr, libFnType);
+      funcOp->setAttr("llvm.emit_c_interface", UnitAttr::get(op->getContext()));
+      funcOp.setPrivate();
+      op->emitRemark("func op");
+      funcOp.dump();
+    }
 
-    rewriter.replaceOpWithNewOp<mlir::CallOp>(op,
-                                              libraryCallAttr.getValue(),
+    rewriter.replaceOpWithNewOp<mlir::CallOp>(op, libraryCallAttr.getValue(),
                                               input.getType(), callOperands);
-	  op->emitRemark("convert extern success");
+    op->emitRemark("convert extern success");
     return success();
   }
 };
@@ -213,7 +213,7 @@ class ConvertTorchToStd : public ConvertTorchToStdBase<ConvertTorchToStd> {
 public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<StandardOpsDialect>();
-	  registry.insert<tensor::TensorDialect>();
+    registry.insert<tensor::TensorDialect>();
     registry.insert<arith::ArithmeticDialect>();
     TorchConversion::getBackendTypeConversionDependentDialects(registry);
   }
@@ -250,6 +250,7 @@ public:
     target.addIllegalOp<AtenAddIntOp>();
     patterns.add<ConvertAtenAddIntOp>(typeConverter, context);
 
+    target.addLegalOp<FuncOp>();
     target.addIllegalOp<ExternOp>();
     patterns.add<ConvertExternOp>(typeConverter, context);
 

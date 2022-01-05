@@ -14,7 +14,7 @@ from torch_mlir_e2e_test.linalg_on_tensors_backends.refbackend import \
     RefBackendLinalgOnTensorsBackend
 
 
-class VectorAddModule(torch.nn.Module):
+class ControlFlowTestModule(torch.nn.Module):
     def __init__(self, do_activation: bool = False):
         super().__init__()
         self.do_activation = do_activation
@@ -26,12 +26,12 @@ class VectorAddModule(torch.nn.Module):
         ([2, 2], torch.float32, True),
     ])
     def forward(self, x, y):
-        # if x.size() == 1:
-        if self.do_activation:
+        # if x.size() == 2:
+        # if self.do_activation:
         # for i in range(x.size()):
         # for i in range(1, 5):
         # while(True):
-            x = x + y
+        x = x + y
             # if self.do_activation:
             #     break
         return torch.add(x, y)
@@ -93,7 +93,7 @@ def compile_module(program: torch.nn.Module):
 
 if __name__ == '__main__':
     print("---------------main-------------------")
-    mlp_module = VectorAddModule(do_activation=False)
+    mlp_module = ControlFlowTestModule(do_activation=False)
     # Create the module and compile it.
     compiled = compile_module(mlp_module)
     # Loads the compiled artifact into the runtime

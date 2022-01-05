@@ -27,14 +27,17 @@ public:
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(CopyToNonValueTensorOp copy,
                                 PatternRewriter &rewriter) const override {
+    copy->emitRemark("AbstractlyInterpretCopyToNonValueTensorOpUsersWithinABlock");
     SmallVector<Operation *> users;
     // See if our limited form of analysis is even applicatble.
     for (Operation *user : copy.getResult().getUsers()) {
       // We can only analyze within a single basic block.
+      user->dump();
       if (user->getBlock() != copy->getBlock())
         return failure();
       // We can only analyze these ops.
-      if (!isa<CopyToValueTensorOp, OverwriteTensorOp>(user))
+      if (!isa<CopyToValueTensorOp, OverwriteTensorOp,
+              CopyToNonValueTensorOp>(user))
         return failure();
       users.push_back(user);
     }
@@ -73,6 +76,7 @@ public:
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(CopyToNonValueTensorOp copy,
                                 PatternRewriter &rewriter) const override {
+  	copy.emitRemark("RewriteViewLikeSubgraph");
     // Find a subgraph starting with this CopyToNonValueTensorOp, and
     // terminating at CopyToValueTensorOp's, possibly with intervening view-like
     // ops.
