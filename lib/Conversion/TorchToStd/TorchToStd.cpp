@@ -46,13 +46,15 @@ public:
 } // namespace
 
 namespace {
-class ConvertAtenAddIntOp : public OpConversionPattern<AtenAddIntOp> {
+template <typename AtenOp, typename BinOp>
+class ConvertAtenBinaryOp : public OpConversionPattern<AtenOp> {
 public:
-  using OpConversionPattern::OpConversionPattern;
+  using OpConversionPattern<AtenOp>::OpConversionPattern;
   LogicalResult
-  matchAndRewrite(AtenAddIntOp op, OpAdaptor adaptor,
+  matchAndRewrite(AtenOp op,
+                  typename OpConversionPattern<AtenOp>::OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<arith::AddIOp>(op, adaptor.a(), adaptor.b());
+    rewriter.template replaceOpWithNewOp<BinOp>(op, adaptor.a(), adaptor.b());
     return success();
   }
 };
@@ -160,7 +162,7 @@ public:
       //	  		continue;
       //	  	}
       //	  	Value cast = rewriter.create<tensor::CastOp>(loc,
-      //tensorType, op); 		  callOperands.push_back(cast);
+      // tensorType, op); 		  callOperands.push_back(cast);
       callOperands.push_back(op);
     }
 
@@ -247,9 +249,13 @@ public:
     target.addIllegalOp<Torch::ConstantIntOp>();
     patterns.add<ConvertTorchConstantOp<Torch::ConstantIntOp>>(typeConverter,
                                                                context);
-    target.addIllegalOp<AtenAddIntOp>();
-    patterns.add<ConvertAtenAddIntOp>(typeConverter, context);
-
+    target.addIllegalOp<AtenAddIntOp, AtenSubIntOp, AtenMulIntOp>();
+    patterns.add<ConvertAtenBinaryOp<AtenAddIntOp, arith::AddIOp>>(
+        typeConverter, context);
+    patterns.add<ConvertAtenBinaryOp<AtenSubIntOp, arith::SubIOp>>(
+        typeConverter, context);
+    patterns.add<ConvertAtenBinaryOp<AtenMulIntOp, arith::MulIOp>>(
+        typeConverter, context);
     target.addLegalOp<FuncOp>();
     target.addIllegalOp<ExternOp>();
     patterns.add<ConvertExternOp>(typeConverter, context);

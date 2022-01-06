@@ -297,6 +297,11 @@ def raw_emit_op(operator: JitOperator, f: TextIO, *, traits: List[str],
     emitter = TextEmitter(f)
     p = lambda *args: emitter.print(*args)
     op_name, td_def_name = operator.get_mlir_names()
+
+    # Generate unique result names for ops with nameless results
+    multiple_results = len(operator.returns) > 1
+    generic_result_name = lambda i: "result" + (str(i) if multiple_results else "")
+
     p(f"def {td_def_name} : Torch_Op<{emitter.quote(op_name)}, [")
     with emitter.indent():
         with emitter.indent():
@@ -321,8 +326,8 @@ def raw_emit_op(operator: JitOperator, f: TextIO, *, traits: List[str],
                 p("Variadic<AnyTorchType>:$results")
             else:
                 p(",\n".join([
-                    f"""{get_ods_type(ret["type"])}:${ret["name"] or "result"}"""
-                    for ret in operator.returns
+                    f"""{get_ods_type(ret["type"])}:${ret["name"] or generic_result_name(e)}"""
+                    for e, ret in enumerate(operator.returns)
                 ]))
         p(");")
 
@@ -338,8 +343,8 @@ def raw_emit_op(operator: JitOperator, f: TextIO, *, traits: List[str],
             assembly_result_types = "type($results)"
         else:
             assembly_result_types = " `,` ".join(
-                f"""type(${ret["name"] or "result"})"""
-                for ret in operator.returns)
+                f"""type(${ret["name"] or generic_result_name(e)})"""
+                for e, ret in enumerate(operator.returns))
         if assembly_operand_types and assembly_result_types:
             maybe_arrow = " `->` "
         else:
@@ -447,6 +452,7 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
                 "aten::cos : (Tensor) -> (Tensor)",
                 "aten::neg : (Tensor) -> (Tensor)",
                 "aten::floor : (Tensor) -> (Tensor)",
+                "aten::ceil : (Tensor) -> (Tensor)",
                 "aten::bitwise_not : (Tensor) -> (Tensor)",
                 "aten::add.Tensor : (Tensor, Tensor, Scalar) -> (Tensor)",
                 "aten::sub.Tensor : (Tensor, Tensor, Scalar) -> (Tensor)",
@@ -454,6 +460,8 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
                 "aten::div.Tensor : (Tensor, Tensor) -> (Tensor)",
                 "aten::lerp.Tensor : (Tensor, Tensor, Tensor) -> (Tensor)",
                 "aten::eq.Tensor : (Tensor, Tensor) -> (Tensor)",
+                "aten::gt.Tensor : (Tensor, Tensor) -> (Tensor)",
+                "aten::lt.Tensor : (Tensor, Tensor) -> (Tensor)",
                 "aten::ne.Tensor : (Tensor, Tensor) -> (Tensor)",
                 "aten::add.Scalar : (Tensor, Scalar, Scalar) -> (Tensor)",
                 "aten::sub.Scalar : (Tensor, Scalar, Scalar) -> (Tensor)",
@@ -463,6 +471,7 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
                 "aten::eq.Scalar : (Tensor, Scalar) -> (Tensor)",
                 "aten::gt.Scalar : (Tensor, Scalar) -> (Tensor)",
                 "aten::ge.Scalar : (Tensor, Scalar) -> (Tensor)",
+                "aten::lt.Scalar : (Tensor, Scalar) -> (Tensor)",
                 "aten::fmod.Scalar : (Tensor, Scalar) -> (Tensor)",
                 "aten::masked_fill.Scalar : (Tensor, Tensor, Scalar) -> (Tensor)",
                 "aten::clamp : (Tensor, Scalar?, Scalar?) -> (Tensor)",
@@ -501,6 +510,9 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
         emit(
             "aten::layer_norm : (Tensor, int[], Tensor?, Tensor?, float, bool) -> (Tensor)"
         )
+        emit (
+            "aten::native_layer_norm : (Tensor, int[], Tensor?, Tensor?, float) -> (Tensor, Tensor, Tensor)"
+        )
         emit(
             "aten::max_pool2d : (Tensor, int[], int[], int[], int[], bool) -> (Tensor)"
         )
@@ -523,8 +535,10 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
         emit("aten::sqrt : (Tensor) -> (Tensor)")
         emit("aten::_softmax : (Tensor, int, bool) -> (Tensor)")
         emit("aten::mean : (Tensor, int?) -> (Tensor)")
+        emit("aten::nll_loss_forward : (Tensor, Tensor, Tensor?, int, int) -> (Tensor, Tensor)")
 
         # Misc tensor ops.
+        emit("aten::squeeze.dim : (Tensor, int) -> (Tensor)", has_folder=True)
         emit("aten::unsqueeze : (Tensor, int) -> (Tensor)")
         emit("aten::squeeze : (Tensor) -> (Tensor)", has_folder=True)
         emit("aten::flatten.using_ints : (Tensor, int, int) -> (Tensor)")
@@ -543,11 +557,14 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
         emit("aten::any.dim : (Tensor, int, bool) -> (Tensor)")
         emit("aten::arange : (Scalar, int?, int?, Device?, bool?) -> (Tensor)")
         emit("aten::arange.start : (Scalar, Scalar, int?, int?, Device?, bool?) -> (Tensor)")
+        emit("aten::arange.start_step : (Scalar, Scalar, Scalar, int?, int?, Device?, bool?) -> (Tensor)")
         emit("aten::argmax : (Tensor, int?, bool) -> (Tensor)")
+        emit("aten::bucketize.Tensor : (Tensor, Tensor, bool, bool) -> (Tensor)")
         emit("aten::contiguous : (Tensor, int) -> (Tensor)")
         emit("aten::copy_ : (Tensor, Tensor, bool) -> (Tensor)")
         emit("aten::detach : (Tensor) -> (Tensor)")
         emit("aten::embedding : (Tensor, Tensor, int, bool, bool) -> (Tensor)")
+        emit("aten::empty_like : (Tensor, int?, int?, Device?, bool?, int?) -> (Tensor)")
         emit("aten::empty.memory_format : (int[], int?, int?, Device?, bool?, int?) -> (Tensor)")
         emit("aten::expand : (Tensor, int[], bool) -> (Tensor)")
         emit("aten::broadcast_to : (Tensor, int[]) -> (Tensor)")
@@ -557,17 +574,19 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
         emit("aten::masked_select : (Tensor, Tensor) -> (Tensor)")
         emit("aten::numel : (Tensor) -> (int)")
         emit("aten::repeat : (Tensor, int[]) -> (Tensor)")
+        emit("aten::reshape : (Tensor, int[]) -> (Tensor)")
         emit("aten::resize_ : (Tensor, int[], int?) -> (Tensor)")
         emit("aten::select.int : (Tensor, int, int) -> (Tensor)")
         emit("aten::size.int : (Tensor, int) -> (int)", has_folder=True)
         emit("aten::stack : (Tensor[], int) -> (Tensor)")
         emit("aten::sum : (Tensor, int?) -> (Tensor)")
         emit("aten::sum.dim_IntList : (Tensor, int[], bool, int?) -> (Tensor)")
-        emit("aten::to.dtype : (Tensor, int, bool, bool, int?) -> (Tensor)")
+        emit("aten::to.dtype : (Tensor, int, bool, bool, int?) -> (Tensor)", has_folder=True)
         emit("aten::to.other : (Tensor, Tensor, bool, bool, int?) -> (Tensor)")
         emit("aten::to.prim_Device : (Tensor, Device?, int?, bool, bool) -> (Tensor)")
         emit("aten::type_as : (Tensor, Tensor) -> (Tensor)")
-        emit("aten::view : (Tensor, int[]) -> (Tensor)")
+        emit("aten::view : (Tensor, int[]) -> (Tensor)", has_folder=True)
+        emit("aten::where.self : (Tensor, Tensor, Tensor) -> (Tensor)")
         emit("aten::slice.Tensor : (Tensor, int, int?, int?, int) -> (Tensor)")
         emit("aten::len.Tensor : (Tensor) -> (int)")
         emit("aten::cpu : (Tensor) -> (Tensor)")
@@ -576,6 +595,7 @@ def emit_aten_ops(torch_ir_dir: str, registry: Registry):
         emit("aten::tensor.float : (float, int?, Device?, bool) -> (Tensor)")
         emit("aten::Int.Tensor : (Tensor) -> (int)", has_folder=True)
         emit("aten::dropout : (Tensor, float, bool) -> (Tensor)")
+        emit("aten::t : (Tensor) -> (Tensor)")
 
         # Dict ops.
         emit("aten::__contains__.str : (Dict(str, t), str) -> (bool)", has_folder=True)

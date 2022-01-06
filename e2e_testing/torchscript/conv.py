@@ -33,6 +33,28 @@ def Conv2dNoPaddingModule_basic(module, tu: TestUtils):
     module.forward(t)
 
 
+class Conv2dBiasNoPaddingModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.conv = torch.nn.Conv2d(2, 10, 3, bias=True)
+        self.train(False)
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1, -1], torch.float32, True),
+    ])
+    def forward(self, x):
+        return self.conv(x)
+
+
+@register_test_case(module_factory=lambda: Conv2dBiasNoPaddingModule())
+def Conv2dBiasNoPaddingModule_basic(module, tu: TestUtils):
+    t = tu.rand(5, 2, 10, 20)
+    module.forward(t)
+
+
 class Conv2dWithPaddingModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -80,5 +102,34 @@ class Conv2dWithPaddingDilationStrideModule(torch.nn.Module):
 @register_test_case(
     module_factory=lambda: Conv2dWithPaddingDilationStrideModule())
 def Conv2dWithPaddingDilationStrideModule_basic(module, tu: TestUtils):
+    t = tu.rand(5, 2, 10, 20)
+    module.forward(t)
+
+
+class Conv2dWithPaddingDilationStrideStaticModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.conv = torch.nn.Conv2d(in_channels=2,
+                                    out_channels=10,
+                                    kernel_size=3,
+                                    padding=3,
+                                    stride=2,
+                                    dilation=3,
+                                    bias=False)
+        self.train(False)
+
+    @export
+    @annotate_args([
+        None,
+        ([5, 2, 10, 20], torch.float32, True),
+    ])
+    def forward(self, x):
+        return self.conv(x)
+
+
+@register_test_case(
+    module_factory=lambda: Conv2dWithPaddingDilationStrideStaticModule())
+def Conv2dWithPaddingDilationStrideStaticModule_basic(module, tu: TestUtils):
     t = tu.rand(5, 2, 10, 20)
     module.forward(t)

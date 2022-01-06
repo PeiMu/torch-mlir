@@ -17,18 +17,13 @@ COMMON_TORCH_MLIR_LOWERING_XFAILS = {
     "QuantizedMLP_basic",
     "IouOfModule_basic",
 }
-# Fails due to https://github.com/llvm/torch-mlir/issues/448
-SIZE_ZERO_TENSOR_XFAILS = {
-    "SliceEndSleStartModule_basic",
-    "SliceStartEqEndModule_basic",
-    "SliceOutOfUpperBoundIndexModule_basic",
-}
-REFBACKEND_XFAIL_SET = set.union(COMMON_TORCH_MLIR_LOWERING_XFAILS, SIZE_ZERO_TENSOR_XFAILS)
+REFBACKEND_XFAIL_SET = COMMON_TORCH_MLIR_LOWERING_XFAILS
 
 # Write the TOSA set as a "passing" set as it is very early in development
 # and very few tests work yet.
 TOSA_PASS_SET = {
     "ElementwiseUnaryModule_basic",
+    "ElementwiseBinaryModule_basic",
     "ElementwiseSigmoidModule_basic",
     "ElementwiseReluModule_basic",
     "ElementwiseFloorModule_basic",
@@ -39,4 +34,15 @@ TOSA_PASS_SET = {
     "AddCMulModule_basic",
     "AddCDivModule_basic",
     "SqueezeModule_broadcast",
+    "BoolTensorReturnFalseModule_basic",
+    "BoolTensorReturnTrueModule_basic",
+    "BoolTensorReturnMixedModule_basic",
+    "ElementwiseRsqrtModule_basic",
+    "SqueezeModule_static",
+    "SqueezeModule_noUnitDim",
+    "SqueezeModule_allUnitDim",
+    "TModuleRank1_basic",
+    "TModuleRank0_basic",
+    "ElementwiseToDtypeIdentityModule_basic",
+    "View1DFoldModule_basic",
 }

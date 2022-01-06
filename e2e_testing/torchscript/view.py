@@ -46,3 +46,80 @@ class ViewDynamicExpandModule(torch.nn.Module):
 def ViewDynamicExpandModule_basic(module, tu: TestUtils):
     module.forward(tu.rand(2, 4, 30, 384))
 
+# ==============================================================================
+
+class ViewDynamicExpandWithAtenSizeIntModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1], torch.float32, True),
+    ])
+
+    def forward(self, a):
+        return a.view(a.size(0), a.size(1), 12, 32)
+
+@register_test_case(module_factory=lambda: ViewDynamicExpandWithAtenSizeIntModule())
+def ViewDynamicExpandWithAtenSizeIntModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(2, 4, 384))
+
+# ==============================================================================
+
+class ViewCollapseModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1], torch.float32, True),
+    ])
+
+    def forward(self, a):
+        return a.view(8)
+
+@register_test_case(module_factory=lambda: ViewCollapseModule())
+def ViewCollapseModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(2, 4))
+
+# ==============================================================================
+
+class ViewCollapseDynamicWithAtenSizeIntModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1, -1, -1, -1, -1, -1], torch.float32, True),
+        ([], torch.int64, True),
+        ([], torch.int64, True),
+    ])
+
+    def forward(self, a, b, c):
+        return a.view(a.size(0), int(b), int(c), a.size(3), 384)
+
+@register_test_case(module_factory=lambda: ViewCollapseDynamicWithAtenSizeIntModule())
+def ViewCollapseDynamicWithAtenSizeIntModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(2, 3, 5, 4, 12, 32), torch.tensor(3), torch.tensor(5))
+
+# ==============================================================================
+
+class View1DFoldModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    @export
+    @annotate_args([
+        None,
+        ([-1], torch.float32, True),
+    ])
+
+    def forward(self, a):
+        return a.view(-1)
+
+@register_test_case(module_factory=lambda: View1DFoldModule())
+def View1DFoldModule_basic(module, tu: TestUtils):
+    module.forward(tu.rand(32))

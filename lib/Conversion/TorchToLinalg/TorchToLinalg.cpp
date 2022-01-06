@@ -133,8 +133,13 @@ static Value castIndexToInt(OpBuilder &b, Location loc, Value idx) {
   return b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
 }
 
-static Value getDimOp(OpBuilder &b, Location loc, Value v, int dimension) {
-  return b.create<tensor::DimOp>(loc, v, dimension);
+static Value getDimOp(OpBuilder &b, Location loc, Value v, int dim) {
+  if (auto tensorType = v.getType().cast<RankedTensorType>()) {
+    if (!tensorType.isDynamicDim(dim))
+      return b.create<arith::ConstantOp>(
+          loc, b.getIndexAttr(tensorType.getShape()[dim]));
+  }
+  return b.create<tensor::DimOp>(loc, v, dim);
 }
 
 static void checkDimEqualHelper(OpBuilder &b, Location loc, Value lhsDim,
@@ -188,6 +193,21 @@ static Value createInitTensor(OpBuilder &b, Location loc, ValueRange sizes,
                               Type elemTy, Value initElem) {
   Value initTensor = b.create<linalg::InitTensorOp>(loc, sizes, elemTy);
   return b.create<linalg::FillOp>(loc, initElem, initTensor).getResult(0);
+}
+// Creates a constant of type `elemType` with value `val`.
+static Value getConstant(OpBuilder &b, Location loc, int64_t val,
+                         Type elemType) {
+  Attribute attr = {};
+  if (elemType.isa<mlir::FloatType>())
+    attr = b.getFloatAttr(elemType, val);
+  if (elemType.isa<mlir::IndexType>())
+    attr = b.getIndexAttr(val);
+  if (elemType.isa<mlir::IntegerType>())
+    attr = b.getIntegerAttr(
+        elemType, APInt(elemType.cast<IntegerType>().getWidth(), val));
+  if (!attr)
+    return nullptr;
+  return b.create<arith::ConstantOp>(loc, elemType, attr);
 }
 
 // Helper function to caculate the output tensor dims for convolution-like ops.
@@ -442,9 +462,6 @@ public:
     if (!matchPattern(op.dilation(), m_TorchConstantIntList(dilationInts)))
       return rewriter.notifyMatchFailure(op,
                                          "only support constant int dilations");
-    if (!op.bias().getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(op, "only support None bias");
-
     Value c1 =
         rewriter.create<arith::ConstantOp>(loc, IntegerAttr::get(intType, 1));
     Value groupEqual1 = rewriter.create<arith::CmpIOp>(
@@ -473,22 +490,47 @@ public:
         rewriter, loc, Win, paddingIntValues[1], dilationIntValues[1],
         castIndexToInt(weightW), strideIntValues[1]);
 
-    Value c0float = rewriter.create<arith::ConstantOp>(
-        loc,
-        FloatAttr::get(
-            input.getType().cast<RankedTensorType>().getElementType(), 0.0));
     Value initTensor = rewriter.create<linalg::InitTensorOp>(
         loc, ValueRange{N, F, Hout, Wout}, elementType);
-    Value initTensor0 =
-        rewriter.create<linalg::FillOp>(loc, c0float, initTensor).getResult(0);
+
+    Value bias = adaptor.bias();
+    Value biasInitTensor;
+    if (bias.getType().isa<Torch::NoneType>()) {
+      Value c0float = rewriter.create<arith::ConstantOp>(
+          loc, FloatAttr::get(elementType, 0.0));
+      biasInitTensor = rewriter.create<linalg::FillOp>(loc, c0float, initTensor)
+                           .getResult(0);
+    } else {
+      auto biasType = bias.getType().cast<RankedTensorType>();
+      if (biasType.getRank() != 1)
+        return rewriter.notifyMatchFailure(op, "expect bias to be rank 1");
+      if (elementType != biasType.getElementType())
+        return rewriter.notifyMatchFailure(op, "unimplemented: type promotion");
+
+      auto resultRank = initTensor.getType().cast<RankedTensorType>().getRank();
+      SmallVector<AffineMap> indexingMaps = {
+          // bias is used to initialize the channels - dimension 1 of output
+          AffineMap::get(/*dimCount=*/resultRank, /*symbolCount=*/0,
+                         rewriter.getAffineDimExpr(1), context),
+          rewriter.getMultiDimIdentityMap(resultRank)};
+      SmallVector<StringRef> iteratorTypes(resultRank, "parallel");
+      biasInitTensor = rewriter
+                           .create<linalg::GenericOp>(
+                               loc, initTensor.getType(), bias, initTensor,
+                               indexingMaps, iteratorTypes,
+                               [](OpBuilder &b, Location loc, ValueRange args) {
+                                 b.create<linalg::YieldOp>(loc, args[0]);
+                               })
+                           .getResult(0);
+    }
 
     auto stridesAttr = rewriter.getI64VectorAttr(strideInts);
     auto dilationAttr = rewriter.getI64VectorAttr(dilationInts);
     Value conv2d =
         rewriter
             .create<linalg::Conv2DNchwFchwOp>(
-                loc, initTensor0.getType(), ValueRange{paddedInput, weight},
-                initTensor0, stridesAttr, dilationAttr)
+                loc, biasInitTensor.getType(), ValueRange{paddedInput, weight},
+                biasInitTensor, stridesAttr, dilationAttr)
             .getResult(0);
     Type newResultType = getTypeConverter()->convertType(op.getType());
     rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, conv2d);
@@ -671,11 +713,12 @@ public:
 // Step 4. Get var.
 // Step 5. Get layernorm.
 namespace {
-class ConvertAtenLayerNormOp : public OpConversionPattern<AtenLayerNormOp> {
+class ConvertAtenNativeLayerNormOp
+    : public OpConversionPattern<AtenNativeLayerNormOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
-  matchAndRewrite(AtenLayerNormOp op, OpAdaptor adaptor,
+  matchAndRewrite(AtenNativeLayerNormOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     MLIRContext *context = op->getContext();
     Location loc = op->getLoc();
@@ -867,9 +910,14 @@ public:
                   b.create<linalg::YieldOp>(loc, result);
                 })
             .getResult(0);
-
-    Type newResultType = getTypeConverter()->convertType(op.getType());
-    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, layerNorm);
+    Type layerNormResultType = getTypeConverter()->convertType(op.getType(0));
+    Type meanResultType = getTypeConverter()->convertType(op.getType(1));
+    Type varResultType = getTypeConverter()->convertType(op.getType(2));
+    Value layerNorm_ =
+        rewriter.create<tensor::CastOp>(loc, layerNormResultType, layerNorm);
+    Value mean_ = rewriter.create<tensor::CastOp>(loc, meanResultType, mean);
+    Value var_ = rewriter.create<tensor::CastOp>(loc, varResultType, var);
+    rewriter.replaceOp(op, {layerNorm_, mean_, var_});
     return success();
   }
 };
@@ -1167,6 +1215,101 @@ public:
 };
 } // namespace
 
+// Given `input`, `target`, `nll_loss_forward` is given by:
+//   for i in range(0, len(target)):
+//     indi = target[i];
+//     nll_loss_forward[i] = -(input[i][indi]);
+// TODO: `weight` and `reduction` operands are still to be taken care of.
+namespace {
+class ConvertAtenNllLossForwardOp
+    : public OpConversionPattern<AtenNllLossForwardOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenNllLossForwardOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+    Location loc = op->getLoc();
+    Value input = adaptor.self();
+    Value target = adaptor.target();
+    Value weight = adaptor.weight();
+
+    int64_t reduce_dim;
+    if (!matchPattern(op.reduction(), m_TorchConstantInt(&reduce_dim)))
+      return rewriter.notifyMatchFailure(op, "dim must be constant");
+
+    // TODO: Handle reduction.
+    if (reduce_dim != 0)
+      return rewriter.notifyMatchFailure(
+          op, "reduction along dimensions is not supported.");
+
+    // TODO: Incorporate the weight argument.
+    if (!weight.getType().isa<mlir::torch::Torch::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "Unimplemented, the weight operand is not incorporated.");
+
+    Value ignoreIndex = adaptor.ignore_index();
+    Value ignoreIndexVal = castIntToIndex(rewriter, loc, ignoreIndex);
+
+    unsigned inputRank = input.getType().cast<RankedTensorType>().getRank();
+    unsigned targetRank = target.getType().cast<RankedTensorType>().getRank();
+
+    // TODO: Cases with targetRank != 1 where `Mean` reduction is required.
+    if (inputRank != 2 || targetRank != 1) {
+      return rewriter.notifyMatchFailure(
+          op, "expected  input and target to be rank 2 and 1 respectively");
+    }
+    RankedTensorType resultType = getTypeConverter()
+                                      ->convertType(op->getResult(0).getType())
+                                      .cast<RankedTensorType>();
+
+    Type elementType = resultType.getElementType();
+
+    Value targetDim = getDimOp(rewriter, loc, target, 0);
+    Value initTensor0 =
+        createZeroInitTensor(rewriter, loc, {targetDim}, elementType);
+    Value zeroVal = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getZeroAttr(elementType));
+
+    SmallVector<AffineExpr> targetExpr;
+    targetExpr.push_back(rewriter.getAffineDimExpr(0));
+    SmallVector<StringRef> iteratorTypes{getParallelIteratorTypeName()};
+    auto indexingMaps = AffineMap::inferFromExprList({targetExpr, targetExpr});
+    Value finalRes =
+        rewriter
+            .create<linalg::GenericOp>(
+                loc, resultType, ValueRange{target}, initTensor0,
+                /*indexingMaps=*/indexingMaps,
+                /*iteratorTypes=*/iteratorTypes,
+                [&](OpBuilder &b, Location loc, ValueRange args) {
+                  Value indTarget = rewriter.create<arith::IndexCastOp>(
+                      loc, rewriter.getIndexType(), args[0]);
+                  Value indI = rewriter.create<linalg::IndexOp>(loc, 0);
+
+                  // The final result is given by:
+                  // final_res = (indI == ignoreIndexVal) ? 0 :
+                  // input[indI][IndTarget]
+                  Value cmpEq = rewriter.create<arith::CmpIOp>(
+                      loc, arith::CmpIPredicate::eq, indI, ignoreIndexVal);
+                  Value result = rewriter.create<tensor::ExtractOp>(
+                      loc, input, ValueRange{indI, indTarget});
+                  Value negate =
+                      rewriter.create<arith::NegFOp>(loc, elementType, result);
+                  Value selectFinal = rewriter.create<mlir::SelectOp>(
+                      loc, cmpEq, zeroVal, negate);
+                  b.create<linalg::YieldOp>(loc, selectFinal);
+                })
+            .getResult(0);
+
+    // TODO: Update the second result tensor.
+    Value weightUpdated = createZeroInitTensor(rewriter, loc, {}, elementType);
+    rewriter.replaceOp(op, {finalRes, weightUpdated});
+    return success();
+  }
+};
+} // namespace
+
 namespace {
 // See comments at in convertMmOp and the heading for this section for general
 // considerations. This function needs to be auto-generated.
@@ -1258,8 +1401,7 @@ public:
           rewriter.getMultiDimIdentityMap(inputType.getRank())};
     } else {
       initTensor = rewriter.create<linalg::InitTensorOp>(
-          loc, ValueRange{inputDim0, weightDim0},
-          inputType.getElementType());
+          loc, ValueRange{inputDim0, weightDim0}, inputType.getElementType());
       transposedWeightInitTensor = rewriter.create<linalg::InitTensorOp>(
           loc, ValueRange{weightDim1, weightDim0}, weightType.getElementType());
       broadcastIndexingMaps = {
@@ -1388,6 +1530,8 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     return b.create<math::ExpOp>(loc, payloadArgs[0]);
   if (isa<AtenFloorOp>(op))
     return b.create<math::FloorOp>(loc, payloadArgs[0]);
+  if (isa<AtenCeilOp>(op))
+    return b.create<math::CeilOp>(loc, payloadArgs[0]);
   if (isa<AtenLogOp>(op))
     return b.create<math::LogOp>(loc, payloadArgs[0]);
   if (isa<AtenSqrtOp>(op))
@@ -1450,10 +1594,13 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
         b.create<arith::ConstantOp>(loc, b.getZeroAttr(elementType));
     Value pred = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT,
                                          payloadArgs[0], constZero);
-    Value positivePart = b.create<SelectOp>(loc, pred, payloadArgs[0], constZero);
-    Value negativePart = b.create<SelectOp>(loc, pred, constZero, payloadArgs[0]);
+    Value positivePart =
+        b.create<SelectOp>(loc, pred, payloadArgs[0], constZero);
+    Value negativePart =
+        b.create<SelectOp>(loc, pred, constZero, payloadArgs[0]);
     Value scale = convertScalarToDtype(b, loc, operands[1], elementType);
-    Value scaledNegativePart = b.create<arith::MulFOp>(loc, negativePart, scale);
+    Value scaledNegativePart =
+        b.create<arith::MulFOp>(loc, negativePart, scale);
     return b.create<arith::AddFOp>(loc, positivePart, scaledNegativePart);
   }
   if (auto gelu = dyn_cast<AtenGeluOp>(op)) {
@@ -1530,6 +1677,42 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
       return b.create<arith::SubIOp>(loc, lhs, scaled);
     }
   }
+  if (auto subScalar = dyn_cast<AtenSubScalarOp>(op)) {
+    Type dtype = converter->convertType(subScalar.getType())
+                     .cast<RankedTensorType>()
+                     .getElementType();
+    Value self = convertScalarToDtype(b, loc, payloadArgs[0], dtype);
+    Value other = convertScalarToDtype(b, loc, operands[1], dtype);
+    Value alpha = convertScalarToDtype(b, loc, operands[2], dtype);
+    if (dtype.isa<mlir::FloatType>()) {
+      Value mult = b.create<arith::MulFOp>(loc, other, alpha);
+      return b.create<arith::SubFOp>(loc, self, mult);
+    } else if (dtype.isa<mlir::IntegerType>()) {
+      Value mult = b.create<arith::MulIOp>(loc, other, alpha);
+      return b.create<arith::SubIOp>(loc, self, mult);
+    }
+    subScalar.emitError("unimplemented: dtype other than float and integer "
+                        "types are not supported.");
+    return nullptr;
+  }
+  if (auto addScalar = dyn_cast<AtenAddScalarOp>(op)) {
+    Type dtype = converter->convertType(addScalar.getType())
+                     .cast<RankedTensorType>()
+                     .getElementType();
+    Value self = convertScalarToDtype(b, loc, payloadArgs[0], dtype);
+    Value other = convertScalarToDtype(b, loc, operands[1], dtype);
+    Value alpha = convertScalarToDtype(b, loc, operands[2], dtype);
+    if (dtype.isa<mlir::FloatType>()) {
+      Value mult = b.create<arith::MulFOp>(loc, other, alpha);
+      return b.create<arith::AddFOp>(loc, self, mult);
+    } else if (dtype.isa<mlir::IntegerType>()) {
+      Value mult = b.create<arith::MulIOp>(loc, other, alpha);
+      return b.create<arith::AddIOp>(loc, self, mult);
+    }
+    addScalar.emitError("unimplemented: dtype other than float and integer "
+                        "types are not supported.");
+    return nullptr;
+  }
   if (auto mul = dyn_cast<AtenMulTensorOp>(op)) {
     AtenMulTensorOp::Adaptor adaptor(operands);
     Type dtype = converter->convertType(mul.getType())
@@ -1542,6 +1725,89 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     } else {
       return b.create<arith::MulIOp>(loc, lhs, rhs);
     }
+  }
+  if (auto gtTensor = dyn_cast<AtenGtTensorOp>(op)) {
+    AtenGtTensorOp::Adaptor adaptor(operands);
+    Type lhsDtype = payloadArgs[0].getType();
+    Type rhsDtype = payloadArgs[1].getType();
+
+    // TODO: Type promotion in case of different `lhsDtype` and `rhsDtype` needs
+    // to be handled.
+    if (lhsDtype != rhsDtype) {
+      gtTensor.emitError("unimplemented: different lhs and rhs dtype");
+      return nullptr;
+    }
+
+    Type elementalType =
+        gtTensor.self().getType().cast<BaseTensorType>().getDtype();
+
+    if (elementalType.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT,
+                                     payloadArgs[0], payloadArgs[1]);
+    if (IntegerType intType = elementalType.dyn_cast<mlir::IntegerType>()) {
+      if (intType.isUnsigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
+                                       payloadArgs[0], payloadArgs[1]);
+      if (intType.isSigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                       payloadArgs[0], payloadArgs[1]);
+    }
+    gtTensor.emitError("unimplemented: dtype isn't supported.");
+    return nullptr;
+  }
+  if (auto eqTensor = dyn_cast<AtenEqTensorOp>(op)) {
+    AtenEqTensorOp::Adaptor adaptor(operands);
+    Type lhsDtype = payloadArgs[0].getType();
+    Type rhsDtype = payloadArgs[1].getType();
+
+    // TODO: Type promotion in case of different `lhsDtype` and `rhsDtype` needs
+    // to be handled.
+    if (lhsDtype != rhsDtype) {
+      eqTensor.emitError("unimplemented: lhs and rhs dtype must be same");
+      return nullptr;
+    }
+
+    Type elementalType =
+        eqTensor.self().getType().cast<BaseTensorType>().getDtype();
+
+    if (elementalType.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UEQ,
+                                     payloadArgs[0], payloadArgs[1]);
+    if (elementalType.isa<mlir::IntegerType>()) {
+      return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                     payloadArgs[0], payloadArgs[1]);
+    }
+    eqTensor.emitError("unimplemented: dtype isn't supported.");
+    return nullptr;
+  }
+  if (auto ltTensor = dyn_cast<AtenLtTensorOp>(op)) {
+    AtenLtTensorOp::Adaptor adaptor(operands);
+    Type lhsDtype = payloadArgs[0].getType();
+    Type rhsDtype = payloadArgs[1].getType();
+
+    // TODO: Type promotion in case of different `lhsDtype` and `rhsDtype` needs
+    // to be handled.
+    if (lhsDtype != rhsDtype) {
+      ltTensor.emitError("unimplemented: lhs and rhs dtype must be same");
+      return nullptr;
+    }
+
+    Type elementalType =
+        ltTensor.self().getType().cast<BaseTensorType>().getDtype();
+
+    if (elementalType.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::ULT,
+                                     payloadArgs[0], payloadArgs[1]);
+    if (IntegerType intType = elementalType.dyn_cast<mlir::IntegerType>()) {
+      if (intType.isUnsigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
+                                       payloadArgs[0], payloadArgs[1]);
+      if (intType.isSigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                       payloadArgs[0], payloadArgs[1]);
+    }
+    ltTensor.emitError("unimplemented: dtype isn't supported.");
+    return nullptr;
   }
   if (auto div = dyn_cast<AtenDivTensorOp>(op)) {
     AtenDivTensorOp::Adaptor adaptor(operands);
@@ -1566,6 +1832,96 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     Value expPromoted = convertScalarToDtype(b, loc, operands[1], dtype);
     return b.create<math::PowFOp>(loc, payloadArgs[0], expPromoted);
   }
+
+  if (auto gtScalar = dyn_cast<AtenGtScalarOp>(op)) {
+    Type dtype = gtScalar.self().getType().cast<BaseTensorType>().getDtype();
+
+    // TODO: `gtTensor` and `gtScalar` share similar code and can be called from
+    // one static function.
+    Value otherPromoted =
+        convertScalarToDtype(b, loc, operands[1], payloadArgs[0].getType());
+
+    if (dtype.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT,
+                                     payloadArgs[0], otherPromoted);
+    if (IntegerType intType = dtype.dyn_cast<mlir::IntegerType>()) {
+      if (!operands[1].getType().isa<mlir::IntegerType>()) {
+        // TODO: Promote tensor args from integer to float.
+        gtScalar.emitError(
+            "unimplemented: type promotion from tensor to scalar.");
+        return nullptr;
+      }
+
+      if (intType.isUnsigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ugt,
+                                       payloadArgs[0], otherPromoted);
+      if (intType.isSigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                       payloadArgs[0], otherPromoted);
+    }
+    gtScalar.emitError("unimplemented: dtype isn't supported.");
+    return nullptr;
+  }
+
+  if (auto eqScalar = dyn_cast<AtenEqScalarOp>(op)) {
+    Type dtype = eqScalar.self().getType().cast<BaseTensorType>().getDtype();
+    Value otherPromoted =
+        convertScalarToDtype(b, loc, operands[1], payloadArgs[0].getType());
+
+    if (dtype.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UEQ,
+                                     payloadArgs[0], otherPromoted);
+    if (dtype.isa<mlir::IntegerType>()) {
+      if (!operands[1].getType().isa<mlir::IntegerType>()) {
+        // TODO: Promote tensor operand from integer to float.
+        eqScalar.emitError(
+            "unimplemented: type promotion from tensor to scalar");
+        return nullptr;
+      }
+      return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                     payloadArgs[0], otherPromoted);
+    }
+    eqScalar.emitError("unimplemented: dtype isn't supported");
+    return nullptr;
+  }
+
+  if (auto ltScalar = dyn_cast<AtenLtScalarOp>(op)) {
+    Type dtype = ltScalar.self().getType().cast<BaseTensorType>().getDtype();
+    Value otherPromoted =
+        convertScalarToDtype(b, loc, operands[1], payloadArgs[0].getType());
+
+    // TODO:  Both tensor and scalar variants of `aten.gt` and `aten.lt` share a
+    // lot of code that can be refactored.
+    if (dtype.isa<mlir::FloatType>())
+      return b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::ULT,
+                                     payloadArgs[0], otherPromoted);
+    if (IntegerType intType = dtype.dyn_cast<mlir::IntegerType>()) {
+      if (!operands[1].getType().isa<mlir::IntegerType>()) {
+        // TODO: Promote tensor operand from integer to float.
+        ltScalar.emitError(
+            "unimplemented: type promotion from tensor to scalar");
+        return nullptr;
+      }
+      if (intType.isUnsigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
+                                       payloadArgs[0], otherPromoted);
+      if (intType.isSigned())
+        return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                       payloadArgs[0], otherPromoted);
+    }
+    ltScalar.emitError("unimplemented: dtype isn't supported.");
+    return nullptr;
+  }
+
+  if (auto whereSelf = dyn_cast<AtenWhereSelfOp>(op)) {
+    Type dtype = converter->convertType(whereSelf.getType())
+                     .cast<RankedTensorType>()
+                     .getElementType();
+    Value lhs = convertScalarToDtype(b, loc, payloadArgs[1], dtype);
+    Value rhs = convertScalarToDtype(b, loc, payloadArgs[2], dtype);
+    return b.create<SelectOp>(loc, payloadArgs[0], lhs, rhs);
+  }
+
   if (auto lerp = dyn_cast<AtenLerpTensorOp>(op)) {
     if (!lerp.getType()
              .cast<ValueTensorType>()
@@ -1655,13 +2011,14 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
     Type dtype = converter->convertType(mulScalar.getType())
                      .cast<RankedTensorType>()
                      .getElementType();
-    if (!dtype.isa<mlir::FloatType>()) {
-      mulScalar.emitError("unimplemented: non-floating point dtype");
-      return nullptr;
-    }
-    Value self = payloadArgs[0];
-    Value other = convertScalarToDtype(b, loc, operands[1], dtype);
-    return b.create<arith::MulFOp>(loc, self, other);
+    Value lhs = convertScalarToDtype(b, loc, payloadArgs[0], dtype);
+    Value rhs = convertScalarToDtype(b, loc, operands[1], dtype);
+    if (dtype.isa<mlir::FloatType>())
+      return b.create<arith::MulFOp>(loc, lhs, rhs);
+    if (dtype.isa<mlir::IntegerType>())
+      return b.create<arith::MulIOp>(loc, lhs, rhs);
+    mulScalar.emitError("unimplemented: Only integer/float dtype supported");
+    return nullptr;
   }
   if (auto atenToDtype = dyn_cast<AtenToDtypeOp>(op)) {
     Value input = payloadArgs[0];
@@ -1922,7 +2279,10 @@ struct ConvertElementwiseOp : ConversionPattern {
              AtenClampOp, AtenRsubScalarOp, AtenMulScalarOp, AtenLogOp,
              AtenSqrtOp, AtenFloorOp, AtenPowTensorScalarOp, AtenLog2Op,
              AtenRsqrtOp, AtenDivScalarOp, AtenAbsOp, AtenReciprocalOp,
-             AtenBitwiseAndTensorOp>(op))
+             AtenBitwiseAndTensorOp, AtenGtScalarOp, AtenEqScalarOp,
+             AtenLtScalarOp, AtenWhereSelfOp, AtenCeilOp, AtenGtTensorOp,
+             AtenEqTensorOp, AtenLtTensorOp, AtenSubScalarOp, AtenAddScalarOp>(
+            op))
       return rewriter.notifyMatchFailure(op, "not a supported elementwise op");
 
     if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
@@ -2354,84 +2714,214 @@ public:
     Location loc = op.getLoc();
     Value input = adaptor.self();
     auto inputType = input.getType().cast<RankedTensorType>();
+    ArrayRef<int64_t> inputShape = inputType.getShape();
     int64_t inputRank = inputType.getRank();
     TypeConverter *typeConverter = getTypeConverter();
     auto resultType =
         typeConverter->convertType(op.getType()).cast<RankedTensorType>();
     int64_t resultRank = resultType.getRank();
-    // When we only have expansion of dimensions in `aten.View`, the output
-    // tensor rank will be strictly greater than the input tensor rank.
-    // TODO: Handle the cases of `aten.View` op where,
-    // 1. One or multiple dimensions are collapsed.
-    // 2. Few dimensions are expanded and few other dimensions are collapsed.
-    if (inputRank >= resultRank) {
+    // Currently, we only handle the expanding OR collapsing cases, we do not
+    // handle expanding And collapsing happening at the same time or cases where
+    // it's neither collapsing nor expanding like view of [2,3] for 3x2 tensor.
+    // TODO: For the expanding And collapsing case, we will need to identify
+    // which dimensions are collapsing and which are expanding and do it in two
+    // steps.
+    // TODO: For neither collapsing nor expanding, we could find a intermediate
+    // shape to collapse and then expanded to the target shape. Like [2,3] =>
+    // [6] => [3, 2].
+    if (inputRank == resultRank)
       return rewriter.notifyMatchFailure(
-          op, "unimplemented: operand tensor rank should be strictly less than "
-              "the desired output rank");
-    }
+          op, "unimplemented: the view op is neither expanding nor collapsing");
+
+    if (resultRank == 0)
+      return rewriter.notifyMatchFailure(op,
+                                         "result shape of rank 0 is invalid");
+
+    // TODO: add support for case inputRank 0 expanded to size 1
+    if (inputRank == 0)
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: input rank 0 is not supported");
+
+    bool isCollapse = inputRank > resultRank ? true : false;
+    int64_t collapsedRank = isCollapse ? resultRank : inputRank;
+    int64_t expandedRank = isCollapse ? inputRank : resultRank;
 
     // Extract the desired output size as a list of integers. This list should
     // have been created using the operation `torch.prim.ListConstruct`.
-    SmallVector<Value> expectedSizeTorchInt;
-    if (!getListConstructElements(op.size(), expectedSizeTorchInt)) {
+    SmallVector<Value> outputSizeTorchInt;
+    if (!getListConstructElements(op.size(), outputSizeTorchInt)) {
       return rewriter.notifyMatchFailure(op,
-                                         "unimplemented: the desired size is "
+                                         "unimplemented: the target size is "
                                          "not constructed from ListConstruct");
     }
-    SmallVector<Value> expectedSize = getTypeConvertedValues(
-        rewriter, loc, typeConverter, expectedSizeTorchInt);
-    if (resultRank != (int64_t)expectedSize.size()) {
+    SmallVector<Value> outputSizeInt = getTypeConvertedValues(
+        rewriter, loc, typeConverter, outputSizeTorchInt);
+    if (resultRank != (int64_t)outputSizeInt.size()) {
       return rewriter.notifyMatchFailure(
           op, "desired size list length mismatches with the result type rank");
     }
+    SmallVector<Value> inputSizeTorchInt = getTensorSizes(rewriter, loc, input);
+    ArrayRef<Value> expandedShapeTorchInt =
+        llvm::makeArrayRef(isCollapse ? inputSizeTorchInt : outputSizeInt);
+    ArrayRef<Value> collapsedShapeTorchInt =
+        llvm::makeArrayRef(isCollapse ? outputSizeInt : inputSizeTorchInt);
 
-    // Check if the `aten.View` can be legalized to `linalg.TensorExpandShape`.
-    // It only handles the case of static dimension expansion. If the dimension
-    // is dynamic, it must not be expanded/splitted.
-    // TODO: Handle the case of dynamic dimension expansion.
-    SmallVector<ReassociationIndices> reassociation(inputRank);
-    SmallVector<int64_t> resultShape;
-    int64_t j = 0;
-    for (auto i : llvm::seq<int64_t>(0, inputRank)) {
-      if (inputType.isDynamicDim(i)) {
-        Value dim = getDimOp(rewriter, loc, input, i);
-        if (j >= resultRank) {
-          return rewriter.notifyMatchFailure(
-              op, "desired size is not compatible with the input tensor size");
+    // Iterate through the view op size list to do the following:
+    //
+    // 1. Combine output size list and input tensor type info to get the most
+    // static outputShape.
+    //
+    // 2. Fill in the reassociation for size list item where the output dim size
+    // is got from `torch.aten.size.int(inputTensor, inputDim)`. We naively
+    // assume this means the corresponding dimension is not expanded or
+    // collapsed. Note this may technically not always be true.
+    // TODO: think of a way better way to at least detect when this assumption
+    // is violated.
+    SmallVector<int64_t> outputShape(resultRank, kUnknownSize);
+    SmallVector<ReassociationIndices> reassociation(collapsedRank);
+    for (auto en : llvm::enumerate(outputSizeTorchInt)) {
+      int64_t inputDim;
+      int64_t outputDim = en.index();
+      // Match torch.aten.size.int(inputTensor, inputDim) with constant inputDim
+      if (matchPattern(en.value(),
+                       m_TorchTensorSizeInt(op.self(), &inputDim))) {
+        auto collapsedDim = isCollapse ? outputDim : inputDim;
+        auto expandedDim = isCollapse ? inputDim : outputDim;
+        reassociation[collapsedDim].push_back(expandedDim);
+        if (!inputType.isDynamicDim(inputDim)) {
+          outputShape[outputDim] = inputShape[inputDim];
+          continue;
         }
-        checkDimEqualHelper(rewriter, loc, dim, expectedSize[j]);
-        reassociation[i].push_back(j++);
-        resultShape.push_back(kUnknownSize);
-      } else {
-        int64_t expandedDim = inputType.getDimSize(i);
-        int64_t outputDim;
-        // A do-while loop is used here to handle the cases where the input
-        // tensor has a dimension of size 1.
-        do {
-          if (j >= resultRank ||
-              !matchPattern(expectedSizeTorchInt[j],
-                            m_TorchConstantInt(&outputDim)) ||
-              expandedDim % outputDim != 0) {
-            return rewriter.notifyMatchFailure(
-                op, "total number of elements mismatch in the expansion");
+      }
+
+      int64_t size;
+      if (matchPattern(en.value(), m_TorchConstantInt(&size)))
+        outputShape[outputDim] = size;
+    }
+
+    SmallVector<int64_t> collapsedShape =
+        isCollapse ? outputShape : llvm::to_vector(inputShape);
+    SmallVector<int64_t> expandedShape =
+        isCollapse ? llvm::to_vector(inputShape) : outputShape;
+
+    // The while loop does the following:
+    // 1. Fill in the reassociation indices for dimensions that are expanded.
+    // Check the interval dimensions between two unchanged dims in the
+    // collapsedShape. If the interval is size 1, associate all the dims
+    // in the expandedShape shape until the next unchanged dim. If the interval
+    // is larger than size 1, figure out the associations with assumptions that
+    // dynamic dimensions are not splitted.
+    // 2. Set collapsedShape and expandedShape following the requirements by
+    // tensor.expand_shape verification code:
+    //    a. As long as one or more of the related dimensions in the expanded
+    //    shape is dynamic the collapsed dimension is dynamic.
+    //    b. If all of the related dimensions are static, the collapsed
+    //    dimension must be static. In other words, if a collapsed dimension is
+    //    dynamic, at least one of the related dimensions need to be dynamic.
+    int64_t collapsedDim = 0, expandedDim = 0;
+    while (collapsedDim < collapsedRank && expandedDim < expandedRank) {
+      // Not empty means the associations has been filled in and the dimension
+      // is unchanged.
+      if (!reassociation[collapsedDim].empty()) {
+        if (expandedDim != reassociation[collapsedDim][0])
+          return op.emitOpError("Unsupported: expanded dims are off from the "
+                                "expected dim got from reassociation");
+        collapsedDim++;
+        expandedDim++;
+        continue;
+      }
+
+      // Collect the dims that are collapsed until hitting the next dim that's
+      // unchanged.
+      SmallVector<int64_t> collapsedDims;
+      while (collapsedDim < collapsedRank &&
+             reassociation[collapsedDim].empty()) {
+        collapsedDims.push_back(collapsedDim);
+        collapsedDim++;
+      }
+      // the next reassociation is for a dim that's unchanged.
+      int64_t expandedDimNext = collapsedDim != collapsedRank
+                                    ? reassociation[collapsedDim][0]
+                                    : expandedRank;
+      if (collapsedDims.size() == 1) {
+        int64_t collapsedDimSize = 1;
+        int64_t collapsedDim = collapsedDims[0];
+        for (auto i : llvm::seq<int64_t>(expandedDim, expandedDimNext)) {
+          reassociation[collapsedDim].push_back(i);
+          if (collapsedDimSize == kUnknownSize)
+            continue;
+
+          int64_t expandedDimSize = expandedShape[i];
+          if (expandedDimSize == kUnknownSize) {
+            collapsedDimSize = kUnknownSize;
+            continue;
           }
-          reassociation[i].push_back(j++);
-          resultShape.push_back(outputDim);
-          expandedDim /= outputDim;
-        } while (expandedDim != 1);
+          collapsedDimSize *= expandedShape[i];
+        }
+        // To meet both requirements from tensor.expand_shape verification code.
+        collapsedShape[collapsedDim] = collapsedDimSize;
+        expandedDim = expandedDimNext;
+        continue;
+      }
+
+      // collpasedDims are expanded to [expandedDim, expandedDimNext)
+      if (expandedDimNext - expandedDim < (int64_t)collapsedDims.size())
+        op.emitError("unimplemented: mixed of expanding and collapsing "
+                     "operations for view");
+      for (auto collapsedDim : collapsedDims) {
+        if (collapsedShape[collapsedDim] == kUnknownSize) {
+          if (expandedDim >= expandedDimNext) {
+            return rewriter.notifyMatchFailure(
+                op,
+                "desired size is not compatible with the input tensor size");
+          }
+          checkDimEqualHelper(rewriter, loc,
+                              collapsedShapeTorchInt[collapsedDim],
+                              expandedShapeTorchInt[expandedDim]);
+          // To meet the second requirement from tensor.expand_shape
+          // verification code.
+          expandedShape[expandedDim] = kUnknownSize;
+          reassociation[collapsedDim].push_back(expandedDim++);
+        } else {
+          int64_t remainingSizeToExpand = collapsedShape[collapsedDim];
+          // A do-while loop is used here to handle the cases where the
+          // collapsed shape tensor has a dimension of size 1.
+          do {
+            int64_t expandedDimSize = expandedShape[expandedDim];
+            if (expandedDim >= expandedDimNext ||
+                expandedShape[expandedDim] == kUnknownSize ||
+                remainingSizeToExpand % expandedDimSize != 0) {
+              return rewriter.notifyMatchFailure(
+                  op, "total number of elements mismatch in the expansion");
+            }
+            reassociation[collapsedDim].push_back(expandedDim++);
+            remainingSizeToExpand /= expandedDimSize;
+          } while (remainingSizeToExpand != 1);
+        }
       }
     }
-    // Make sure that the splitted dimensions have the same number of elements
-    // as the dimension got splitted from.
-    if (j != resultRank)
-      return rewriter.notifyMatchFailure(
-          op, "desired size is not compatible with the input tensor size");
 
-    Type expandType =
-        RankedTensorType::get(resultShape, resultType.getElementType());
-    Value expandOp = rewriter.create<linalg::TensorExpandShapeOp>(
-        loc, expandType, adaptor.self(), reassociation);
-    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, expandOp);
+    if (collapsedDim != collapsedRank || expandedDim != expandedRank)
+      return rewriter.notifyMatchFailure(op, "view shape is not supported");
+    Type adjustedResultType =
+        RankedTensorType::get(isCollapse ? collapsedShape : expandedShape,
+                              resultType.getElementType());
+    Type adjustedInputType =
+        RankedTensorType::get(isCollapse ? expandedShape : collapsedShape,
+                              resultType.getElementType());
+    Value castedInput =
+        rewriter.create<tensor::CastOp>(loc, adjustedInputType, input);
+    Value result =
+        isCollapse
+            ? rewriter
+                  .create<linalg::TensorCollapseShapeOp>(
+                      loc, adjustedResultType, castedInput, reassociation)
+                  .result()
+            : rewriter
+                  .create<linalg::TensorExpandShapeOp>(
+                      loc, adjustedResultType, castedInput, reassociation)
+                  .result();
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, result);
     return success();
   }
 };
@@ -2523,6 +3013,76 @@ public:
       // `aten.squeeze` will behave as an identity operation.
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, input);
     }
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class ConvertAtenSqueezeDimOp : public OpConversionPattern<AtenSqueezeDimOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenSqueezeDimOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+    Value input = adaptor.self();
+    auto inputType = input.getType().cast<RankedTensorType>();
+    int64_t inputRank = inputType.getRank();
+
+    if (inputRank == 0) {
+      return rewriter.notifyMatchFailure(
+          op, "zero input rank should have been handled by the folder");
+    }
+
+    int64_t dim;
+    if (!matchPattern(op.dim(), m_TorchConstantInt(&dim)))
+      return rewriter.notifyMatchFailure(op, "dim must be constant");
+    dim = toPositiveDim(dim, inputRank);
+    if (!isValidDim(dim, inputRank))
+      return rewriter.notifyMatchFailure(op, "dim is statically invalid");
+
+    // TODO: Handle the case where the dim(th) dimension is dynamic.
+    if (inputType.isDynamicDim(dim)) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: dim(th) dimension is not expected to be dynamic");
+    }
+
+    TypeConverter *typeConverter = getTypeConverter();
+    auto resultType =
+        typeConverter->convertType(op.getType()).cast<RankedTensorType>();
+    int64_t resultRank = resultType.getRank();
+
+    // If the dim(th) dimension of operand tensor type is not statically unit,
+    // `aten.squeeze` will behave as an identity operation.
+    if (inputType.getDimSize(dim) != 1) {
+      rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, input);
+      return success();
+    }
+
+    SmallVector<ReassociationIndices> reassociationMap(resultRank);
+    bool alreadyCrossedSqueezedDim = false;
+    for (int i = 0; i != resultRank; i++) {
+      if (alreadyCrossedSqueezedDim) {
+        reassociationMap[i].push_back(i + 1);
+      } else {
+        reassociationMap[i].push_back(i);
+        if (dim != 0 && i != dim - 1)
+          continue;
+
+        alreadyCrossedSqueezedDim = true;
+        if (dim == 0)
+          reassociationMap[0].push_back(1);
+        if (i == dim - 1)
+          reassociationMap[i].push_back(dim);
+      }
+    }
+    // Note: In case the operand tensor type is of unit rank and is statically
+    // shaped with unit dimension, the `reassociationMap` will be empty and the
+    // input will be collapsed to a 0-D tensor.
+    rewriter.replaceOpWithNewOp<linalg::TensorCollapseShapeOp>(
+        op, resultType, input, reassociationMap);
     return success();
   }
 };
@@ -2768,8 +3328,16 @@ public:
       return castIntToIndex(rewriter, loc, startOrEndBoundedByDimSize);
     };
 
+    if (op.start().getType().isa<OptionalType>() ||
+        op.end().getType().isa<OptionalType>())
+      return rewriter.notifyMatchFailure(op, "unimplemented optional type arg");
     Value start = adjustStartOrEnd(op.start(), adaptor.start(), zero);
     Value end = adjustStartOrEnd(op.end(), adaptor.end(), dimSize);
+
+    // end >= start ? end : start
+    Value endSgeStart = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::sge, end, start);
+    end = rewriter.create<SelectOp>(loc, endSgeStart, end, start);
 
     int64_t step;
     if (!matchPattern(op.step(), m_TorchConstantInt(&step))) {
@@ -3031,7 +3599,6 @@ public:
 };
 } // namespace
 
-
 namespace {
 class ConvertAtenFill_ScalarOp : public OpConversionPattern<AtenFill_ScalarOp> {
 public:
@@ -3056,7 +3623,6 @@ public:
   }
 };
 } // namespace
-
 
 namespace {
 class ConvertAtenBroadcastToOp : public OpConversionPattern<AtenBroadcastToOp> {
@@ -3173,58 +3739,162 @@ public:
 } // namespace
 
 namespace {
-class ConvertAtenOnesOp : public OpConversionPattern<AtenOnesOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
+struct ConvertAtenScalarToTensorLike : ConversionPattern {
+  ConvertAtenScalarToTensorLike(TypeConverter &typeConverter,
+                                MLIRContext *context)
+      : ConversionPattern(typeConverter, MatchAnyOpTypeTag(), /*benefit=*/1,
+                          context) {}
   LogicalResult
-  matchAndRewrite(AtenOnesOp op, OpAdaptor adaptor,
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<AtenTensorIntOp, AtenTensorFloatOp>(op))
+      return rewriter.notifyMatchFailure(
+          op, "not a supported Scalar to Tensor like op");
+
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+    Location loc = op->getLoc();
+    Value elemVal, dtype, device, requires_grad;
+    if (AtenTensorIntOp tensorIntOp = dyn_cast<AtenTensorIntOp>(op)) {
+      AtenTensorIntOp::Adaptor adaptor(operands);
+      elemVal = adaptor.t();
+      dtype = tensorIntOp.dtype();
+      device = tensorIntOp.device();
+      requires_grad = tensorIntOp.requires_grad();
+    }
+    if (AtenTensorFloatOp tensorFloatOp = dyn_cast<AtenTensorFloatOp>(op)) {
+      AtenTensorFloatOp::Adaptor adaptor(operands);
+      elemVal = adaptor.t();
+      dtype = tensorFloatOp.dtype();
+      device = tensorFloatOp.device();
+      requires_grad = tensorFloatOp.requires_grad();
+    }
+    // TODO: Dtype conversion.
+    if (!dtype.getType().isa<Torch::NoneType>())
+      return rewriter.notifyMatchFailure(op, "Unimplemented non-None dtype");
+
+    // TODO: Device information.
+    if (!device.getType().isa<Torch::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "Unimplemented non-None device information");
+
+    RankedTensorType resultType = getTypeConverter()
+                                      ->convertType(op->getResult(0).getType())
+                                      .cast<RankedTensorType>();
+    Type outElementType = resultType.getElementType();
+    Value elemValProm =
+        convertScalarToDtype(rewriter, loc, elemVal, outElementType);
+    Value zeroDTensor =
+        createInitTensor(rewriter, loc, {}, outElementType, elemValProm);
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, zeroDTensor);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// Converts constant tensor allocation like ops.
+template <typename OpTy, int fillVal>
+class ConvertConstantTensorAllocOp : public OpConversionPattern<OpTy> {
+public:
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
       return failure();
+
+    // TODO: Add support for layout, pin_memory features.
+    // Only `none` layout is supported.
+    if (!op.layout().getType().template isa<Torch::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: only default layout is supported");
+
+    // The pin_memory should be either `False` or `none`.
+    bool pinMemory;
+    if (!op.pin_memory().getType().template isa<Torch::NoneType>() &&
+        (!matchPattern(op.pin_memory(), m_TorchConstantBool(&pinMemory)) ||
+         pinMemory)) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: pin_memory must be either None or false");
+    }
+
     Location loc = op.getLoc();
-
-    // We ignore device, but add simple asserts for unimplemented kwargs
-    if (!op.layout().getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(op,
-                                         "only default layout is supported");
-
-    bool pinMemory = false;
-    if (!op.pin_memory().getType().isa<Torch::NoneType>() &&
-        !matchPattern(op.pin_memory(), m_TorchConstantBool(&pinMemory))) {
+    TypeConverter *typeConverter = this->getTypeConverter();
+    SmallVector<Value> resultSizeTorchInt, resultSize, resultSizeIndex;
+    if (!getListConstructElements(op.size(), resultSizeTorchInt)) {
       return rewriter.notifyMatchFailure(
-          op, "pin_memory must be constant bool or None");
+          op, "unimplemented: size must be constructed using ListConstruct");
     }
-    if (pinMemory)
-      return rewriter.notifyMatchFailure(op, "memory pinning not supported");
+    resultSize = getTypeConvertedValues(rewriter, loc, typeConverter,
+                                        resultSizeTorchInt);
+    for (auto size : resultSize)
+      resultSizeIndex.push_back(castIntToIndex(rewriter, loc, size));
 
-    SmallVector<Value> size, sizeIndex;
-    if (!getListConstructElements(op.size(), size)) {
+    auto resultType = typeConverter->convertType(op.getType())
+                          .template cast<RankedTensorType>();
+    Type outElemType = resultType.getElementType();
+
+    // Create an uninitialized tensor of `resultSize` shape and fill it with
+    // value `fillVal`.
+    Value constVal = getConstant(rewriter, loc, fillVal, outElemType);
+    Value outputTensor =
+        createInitTensor(rewriter, loc, resultSizeIndex, outElemType, constVal);
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, outputTensor);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// Converts `aten.empty` to `linalg.init_tensor` op.
+class ConvertAtenEmptyMemoryFormatOp
+    : public OpConversionPattern<AtenEmptyMemoryFormatOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenEmptyMemoryFormatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+
+    // TODO: Add support for layout, pin_memory and memory_format features.
+    // Only `none` layout is supported.
+    if (!op.layout().getType().template isa<Torch::NoneType>())
       return rewriter.notifyMatchFailure(
-          op, "size must be created by ListConstruct");
+          op, "unimplemented: only default layout is supported");
+
+    // The pin_memory should be either `False` or `none`.
+    bool pinMemory;
+    if (!op.pin_memory().getType().template isa<Torch::NoneType>() &&
+        (!matchPattern(op.pin_memory(), m_TorchConstantBool(&pinMemory)) ||
+         pinMemory))
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: pin_memory must be either None or false");
+
+    // Only `none` memory_format is supported.
+    if (!op.memory_format().getType().template isa<Torch::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: only default memory format is supported");
+
+    Location loc = op.getLoc();
+    TypeConverter *typeConverter = this->getTypeConverter();
+    SmallVector<Value> resultSizeTorchInt, resultSize, resultSizeIndex;
+    if (!getListConstructElements(op.size(), resultSizeTorchInt)) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: size must be constructed using ListConstruct");
     }
-    size = getTypeConvertedValues(rewriter, loc, getTypeConverter(), size);
-    for (size_t i = 0; i < size.size(); i++)
-      sizeIndex.push_back(castIntToIndex(rewriter, loc, size[i]));
+    resultSize = getTypeConvertedValues(rewriter, loc, typeConverter,
+                                        resultSizeTorchInt);
+    for (auto size : resultSize)
+      resultSizeIndex.push_back(castIntToIndex(rewriter, loc, size));
 
-    RankedTensorType newResultType =
-        getTypeConverter()->convertType(op.getType()).cast<RankedTensorType>();
-    Type outElementType = newResultType.getElementType();
-
-    Value one = rewriter.create<arith::ConstantOp>(
-        loc, outElementType,
-        (outElementType.isa<mlir::FloatType>()
-             ? rewriter.getFloatAttr(outElementType, 1).cast<mlir::Attribute>()
-             : rewriter.getIntegerAttr(outElementType, 1)
-                   .cast<mlir::Attribute>()));
-    Value outTensor = rewriter
-                          .create<linalg::InitTensorOp>(
-                              loc, sizeIndex, newResultType.getElementType())
-                          .getResult();
-    Value fillOp =
-        rewriter.create<linalg::FillOp>(loc, one, outTensor).getResult(0);
-
-    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, fillOp);
-
+    auto resultType = typeConverter->convertType(op.getType())
+                          .template cast<RankedTensorType>();
+    // Create an uninitialized tensor of `resultSize` shape.
+    Value initTensor = rewriter.create<linalg::InitTensorOp>(
+        loc, resultSizeIndex, resultType.getElementType());
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, initTensor);
     return success();
   }
 };
@@ -3275,17 +3945,185 @@ public:
 };
 } // namespace
 
-//namespace {
+namespace {
+// Let's say we have an input tensor: initialized with some random values of
+// size [4, 5, 6]. An index tensor (always 1-d): [0, 2] of size [2], and an
+// integer argument dim = 1. The size of the output tensor will be [4, 2, 6].
+// The approach is as follows:
+//
+// for i in range(input.size[0])
+//    for j in range(index.size[0])
+//       for k in range(input.size[2])
+//          indexValue = index[j]
+//          output[i,j,k] = input[i,indexValue,k]
+
+class ConvertAtenIndexSelectOp : public OpConversionPattern<AtenIndexSelectOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenIndexSelectOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+
+    Location loc = op.getLoc();
+    Value input = adaptor.self();
+    Value indices = adaptor.index();
+    RankedTensorType inputType = input.getType().cast<RankedTensorType>();
+    RankedTensorType resultType = getTypeConverter()
+                                      ->convertType(op->getResult(0).getType())
+                                      .cast<RankedTensorType>();
+    Type elementType = resultType.getElementType();
+    unsigned inputRank = inputType.getRank();
+
+    int64_t dimInt;
+    if (!matchPattern(op.dim(), m_TorchConstantInt(&dimInt)))
+      return op->emitError("unimplemented: dim is not constant");
+
+    SmallVector<Value> resultShape = getTensorSizes(rewriter, loc, input);
+    resultShape[dimInt] = getTensorSizes(rewriter, loc, indices)[0];
+    Value initTensor =
+        rewriter.create<linalg::InitTensorOp>(loc, resultShape, elementType);
+
+    SmallVector<AffineExpr> resultExpr;
+    AffineExpr indicesExpr = rewriter.getAffineDimExpr(dimInt);
+    SmallVector<StringRef> iteratorTypes;
+
+    for (unsigned i = 0; i < inputRank; i++) {
+      resultExpr.push_back(rewriter.getAffineDimExpr(i));
+      iteratorTypes.push_back(getParallelIteratorTypeName());
+    }
+
+    auto indexingMaps = AffineMap::inferFromExprList({indicesExpr, resultExpr});
+
+    Value finalRes =
+        rewriter
+            .create<linalg::GenericOp>(
+                loc, initTensor.getType(), ValueRange{indices}, initTensor,
+                /*indexingMaps=*/indexingMaps,
+                /*iteratorTypes=*/iteratorTypes,
+                [&](OpBuilder &b, Location loc, ValueRange args) {
+                  Value index = rewriter.create<arith::IndexCastOp>(
+                      loc, rewriter.getIndexType(), args[0]);
+                  SmallVector<Value> indexTarget;
+                  for (unsigned i = 0; i < inputRank; i++)
+                    indexTarget.push_back(b.create<linalg::IndexOp>(loc, i));
+                  indexTarget[dimInt] = index;
+                  Value extractedElement =
+                      b.create<tensor::ExtractOp>(loc, input, indexTarget);
+                  b.create<linalg::YieldOp>(loc, extractedElement);
+                })
+            .getResult(0);
+
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, finalRes);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// Let's say the result of the `aten.arange.start_step` is `output` which is a
+// 1-d output tensor. The approach used for generating the output tensor is as
+// follows:
+//    for i in range(ceil((end-start)/step))
+//          output[i] = start + (i * step)
+class ConvertAtenArangeStartStepOp
+    : public OpConversionPattern<AtenArangeStartStepOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenArangeStartStepOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
+      return failure();
+
+    // TODO: Add support for layout, pin_memory features.
+    // Only `none` layout is supported.
+    if (!op.layout().getType().isa<Torch::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: only default layout is supported");
+
+    // The pin_memory should be either `False` or `none`.
+    bool pinMemory;
+    if (!op.pin_memory().getType().isa<Torch::NoneType>() &&
+        (!matchPattern(op.pin_memory(), m_TorchConstantBool(&pinMemory)) ||
+         pinMemory)) {
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: pin_memory must be either None or false");
+    }
+
+    Location loc = op.getLoc();
+    TypeConverter *typeConverter = this->getTypeConverter();
+    RankedTensorType resultType =
+        typeConverter->convertType(op->getResult(0).getType())
+            .cast<RankedTensorType>();
+    Type dtype = resultType.getElementType();
+    Value start = convertScalarToDtype(rewriter, loc, adaptor.start(), dtype);
+    Value end = convertScalarToDtype(rewriter, loc, adaptor.end(), dtype);
+    Value step = convertScalarToDtype(rewriter, loc, adaptor.step(), dtype);
+
+    // The result will always be a 1-d tensor.
+    // The size of the result is calculated as follows:
+    //          ceil((end - start)/step)
+    Value resultShape;
+    if (dtype.isa<mlir::IntegerType>()) {
+      Value subOut = rewriter.create<arith::SubIOp>(loc, end, start);
+      resultShape = rewriter.create<arith::CeilDivSIOp>(loc, subOut, step);
+    } else {
+      Value subOut = rewriter.create<arith::SubFOp>(loc, end, start);
+      Value divOut = rewriter.create<arith::DivFOp>(loc, subOut, step);
+      Value ceilOut = rewriter.create<math::CeilOp>(loc, divOut);
+      resultShape =
+          rewriter.create<arith::FPToUIOp>(loc, rewriter.getI64Type(), ceilOut);
+    }
+    resultShape = castIntToIndex(rewriter, loc, resultShape);
+
+    Value resultTensor =
+        rewriter.create<linalg::InitTensorOp>(loc, resultShape, dtype);
+
+    StringRef iteratorType = getParallelIteratorTypeName();
+    AffineMap indexingMap =
+        AffineMap::getMultiDimIdentityMap(1, op->getContext());
+
+    Value finalRes =
+        rewriter
+            .create<linalg::GenericOp>(
+                loc, /*resultTensorTypes=*/resultTensor.getType(),
+                /*inputs=*/ValueRange({}),
+                /*outputs=*/resultTensor,
+                /*indexingMaps=*/indexingMap,
+                /*iteratorTypes=*/iteratorType,
+                [&](OpBuilder &b, Location loc, ValueRange payloadArgs) {
+                  Value index = b.create<linalg::IndexOp>(loc, 0);
+                  index = castIndexToInt(b, loc, index);
+                  index = convertScalarToDtype(b, loc, index, dtype);
+                  Value mulOut, result;
+                  if (dtype.isa<mlir::FloatType>()) {
+                    mulOut = b.create<arith::MulFOp>(loc, step, index);
+                    result = b.create<arith::AddFOp>(loc, start, mulOut);
+                  } else {
+                    mulOut = b.create<arith::MulIOp>(loc, step, index);
+                    result = b.create<arith::AddIOp>(loc, start, mulOut);
+                  }
+                  b.create<linalg::YieldOp>(loc, result);
+                })
+            .getResult(0);
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, finalRes);
+    return success();
+  }
+};
+} // namespace
+
+// namespace {
 //// for element-wise only
-//class ConvertExternOp : public OpConversionPattern<ExternOp> {
-//public:
+// class ConvertExternOp : public OpConversionPattern<ExternOp> {
+// public:
 //	using OpConversionPattern::OpConversionPattern;
 //	LogicalResult
 //	matchAndRewrite(ExternOp op, OpAdaptor adaptor,
-//								 ConversionPatternRewriter &rewriter) const override {
-//		if (failed(verifyLinalgCompatibleTypes(op, rewriter))) {
-//			op->emitError("uncompatible type");
-//			return failure();
+//								 ConversionPatternRewriter
+//&rewriter) const override { 		if (failed(verifyLinalgCompatibleTypes(op,
+//rewriter))) { 			op->emitError("uncompatible type"); 			return failure();
 //		}
 //		Location loc = op->getLoc();
 //		MLIRContext *context = op->getContext();
@@ -3318,7 +4156,8 @@ public:
 //		for (auto i : llvm::seq<int64_t>(0, inputRank))
 //			dimVec.push_back(getDimOp(rewriter, loc, input, i));
 //		Value initTensor = rewriter.create<linalg::InitTensorOp>(
-//						loc, ValueRange(dimVec), elementType);
+//						loc, ValueRange(dimVec),
+//elementType);
 //
 //		// indexing_maps
 //		SmallVector<AffineMap> indexingMaps;
@@ -3329,8 +4168,8 @@ public:
 //    // outputs
 //    SmallVector<AffineExpr> indexMapsVec;
 //		for (auto i : llvm::seq<int64_t>(0, inputRank))
-//			indexMapsVec.push_back(mlir::getAffineDimExpr(i, context));
-//		auto ncIndexingMap = AffineMap::get(
+//			indexMapsVec.push_back(mlir::getAffineDimExpr(i,
+//context)); 		auto ncIndexingMap = AffineMap::get(
 //						/*dimCount=*/inputRank,
 //						/*symbolCount=*/0,
 //						indexMapsVec,
@@ -3343,8 +4182,9 @@ public:
 //		  iteratorTypes.push_back("parallel");
 //
 //		// library_call
-//		mlir::StringAttr libraryCallAttr = ::mlir::StringAttr::get(context, nameParts.back());
-//		op->emitRemark("library call attr: ") << libraryCallAttr.str();
+//		mlir::StringAttr libraryCallAttr =
+//::mlir::StringAttr::get(context, nameParts.back()); 		op->emitRemark("library
+//call attr: ") << libraryCallAttr.str();
 //
 //		// linalg.generic
 //    SmallVector<Value> inputs;
@@ -3374,9 +4214,9 @@ public:
 ////		privateFuncOperand.push_back(initTensor);
 //
 ////		// create the definition of function call
-////		auto funcType = rewriter.getFunctionType(privateFuncOperandTypes, {});
-////    rewriter.create<FuncOp>(loc,
-////    				libraryCallAttr.getValue(), funcType).setPrivate();
+////		auto funcType = rewriter.getFunctionType(privateFuncOperandTypes,
+///{}); /    rewriter.create<FuncOp>(loc, /
+///libraryCallAttr.getValue(), funcType).setPrivate();
 //    Value result =
 //        rewriter
 //            .create<linalg::GenericOp>(
@@ -3460,11 +4300,15 @@ public:
         AtenAddTensorOp, AtenMulTensorOp, AtenDivTensorOp, AtenSubTensorOp,
         AtenLerpTensorOp, AtenSigmoidOp, AtenMinimumOp, AtenMaximumOp,
         AtenToDtypeOp, AtenClampOp, AtenRsubScalarOp, AtenLogOp, AtenSqrtOp,
-        AtenFloorOp, AtenPowTensorScalarOp, AtenLog2Op, AtenRsqrtOp, AtenAbsOp,
-        AtenReciprocalOp, AtenBitwiseAndTensorOp>();
+        AtenFloorOp, AtenCeilOp, AtenPowTensorScalarOp, AtenLog2Op, AtenRsqrtOp,
+        AtenAbsOp, AtenReciprocalOp, AtenBitwiseAndTensorOp, AtenGtScalarOp,
+        AtenEqScalarOp, AtenLtScalarOp, AtenWhereSelfOp, AtenGtTensorOp,
+        AtenEqTensorOp, AtenLtTensorOp>();
     patterns.add<ConvertElementwiseOp>(typeConverter, context);
     target.addIllegalOp<AtenSqueezeOp>();
     patterns.add<ConvertAtenSqueezeOp>(typeConverter, context);
+    target.addIllegalOp<AtenSqueezeDimOp>();
+    patterns.add<ConvertAtenSqueezeDimOp>(typeConverter, context);
     target.addIllegalOp<AtenUnsqueezeOp>();
     patterns.add<ConvertAtenUnsqueezeOp>(typeConverter, context);
     target.addIllegalOp<AtenConv2dOp>();
@@ -3487,8 +4331,8 @@ public:
     patterns.add<ConvertAtenCatOp>(typeConverter, context);
     target.addIllegalOp<AtenGatherOp>();
     patterns.add<ConvertAtenGatherOp>(typeConverter, context);
-    target.addIllegalOp<AtenLayerNormOp>();
-    patterns.add<ConvertAtenLayerNormOp>(typeConverter, context);
+    target.addIllegalOp<AtenNativeLayerNormOp>();
+    patterns.add<ConvertAtenNativeLayerNormOp>(typeConverter, context);
     target.addIllegalOp<AtenBroadcastToOp>();
     patterns.add<ConvertAtenBroadcastToOp>(typeConverter, context);
     target.addIllegalOp<AtenArgmaxOp>();
@@ -3497,8 +4341,13 @@ public:
     patterns.add<ConvertAtenSizeIntOp>(typeConverter, context);
     target.addIllegalOp<AtenEmbeddingOp>();
     patterns.add<ConvertAtenEmbeddingOp>(typeConverter, context);
-    target.addIllegalOp<AtenOnesOp>();
-    patterns.add<ConvertAtenOnesOp>(typeConverter, context);
+    target.addIllegalOp<AtenEmptyMemoryFormatOp>();
+    patterns.add<ConvertAtenEmptyMemoryFormatOp>(typeConverter, context);
+    target.addIllegalOp<AtenZerosOp, AtenOnesOp>();
+    patterns.add<ConvertConstantTensorAllocOp<AtenZerosOp, 0>>(typeConverter,
+                                                               context);
+    patterns.add<ConvertConstantTensorAllocOp<AtenOnesOp, 1>>(typeConverter,
+                                                              context);
     target.addIllegalOp<AtenContiguousOp>();
     patterns.add<ConvertAtenContiguousOp>(typeConverter, context);
     target.addIllegalOp<AtenIntTensorOp>();
@@ -3513,8 +4362,16 @@ public:
     patterns.add<ConvertAtenNumelOp>(typeConverter, context);
     target.addIllegalOp<AtenSliceTensorOp>();
     patterns.add<ConvertAtenSliceTensorOp>(typeConverter, context);
-//	  target.addIllegalOp<ExternOp>();
-//	  patterns.add<ConvertExternOp>(typeConverter, context);
+    target.addIllegalOp<AtenNllLossForwardOp>();
+    patterns.add<ConvertAtenNllLossForwardOp>(typeConverter, context);
+    target.addIllegalOp<AtenIndexSelectOp>();
+    patterns.add<ConvertAtenIndexSelectOp>(typeConverter, context);
+    patterns.add<ConvertAtenScalarToTensorLike>(typeConverter, context);
+    target.addIllegalOp<AtenTensorIntOp, AtenTensorFloatOp>();
+    patterns.add<ConvertAtenArangeStartStepOp>(typeConverter, context);
+    target.addIllegalOp<AtenArangeStartStepOp>();
+    // target.addIllegalOp<ExternOp>();
+    // patterns.add<ConvertExternOp>(typeConverter, context);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))

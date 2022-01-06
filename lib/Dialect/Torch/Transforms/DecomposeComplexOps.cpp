@@ -379,6 +379,36 @@ public:
 };
 } // namespace
 
+namespace {
+class DecomposeAtenTOp : public OpRewritePattern<AtenTOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenTOp op,
+                                PatternRewriter &rewriter) const override {
+    Value lhs = op.self();
+    int lhsRank = getTensorRank(lhs);
+    auto loc = op.getLoc();
+
+    if (lhsRank > 2 || lhsRank < 0) {
+      std::string errorMessage =
+          "t() expects a tensor with <=2 dimensions, but self is " +
+          std::to_string(lhsRank) + "D";
+      return rewriter.notifyMatchFailure(op, errorMessage.c_str());
+    } else if (lhsRank < 2)
+      rewriter.replaceOp(op, lhs);
+    else {
+      Value zero =
+          rewriter.create<ConstantIntOp>(loc, rewriter.getI64IntegerAttr(0));
+      Value one =
+          rewriter.create<ConstantIntOp>(loc, rewriter.getI64IntegerAttr(1));
+      rewriter.replaceOpWithNewOp<AtenTransposeIntOp>(op, op.getType(), lhs,
+                                                      zero, one);
+    }
+    return success();
+  }
+};
+} // namespace
+
 // Decompose torch.expand into torch.broadcast_to op.
 namespace {
 class DecomposeAtenExpandOp : public OpRewritePattern<AtenExpandOp> {
@@ -477,6 +507,102 @@ class DecomposeAtenAddCLikeOp : public OpRewritePattern<OpTy> {
     return success();
   }
 };
+
+class DecomposeAtenLayerNormOp : public OpRewritePattern<AtenLayerNormOp> {
+  using OpRewritePattern<AtenLayerNormOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenLayerNormOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+
+    auto input = op.input().getType().cast<BaseTensorType>();
+    if (!input.hasSizes())
+      return rewriter.notifyMatchFailure(
+          op, "input tensor should have known sizes.");
+    int64_t inputRank = input.getSizes().size();
+    Value normalizedShape = op.normalized_shape();
+    SmallVector<Value> normalizedShapeSizesTorchInt;
+    getListConstructElements(normalizedShape, normalizedShapeSizesTorchInt);
+    std::vector<int64_t> meanVarSizes;
+    for (int i = normalizedShapeSizesTorchInt.size(); i < inputRank; i++)
+      meanVarSizes.push_back(input.getSizes()[i]);
+    auto meanVarType = input.getWithSizesAndDtype(
+        llvm::makeArrayRef(meanVarSizes), input.getDtype());
+    auto nativeLayerNorm = rewriter.create<AtenNativeLayerNormOp>(
+        loc, op.getType(), meanVarType, meanVarType, op.input(),
+        op.normalized_shape(), op.weight(), op.bias(), op.eps());
+    rewriter.replaceOp(op, nativeLayerNorm.getResult(0));
+    return success();
+  }
+};
+} // namespace
+
+// Decompose `aten.empty_like` op into `aten.size` and `aten.empty` ops.
+namespace {
+class DecomposeAtenEmptyLikeOp : public OpRewritePattern<AtenEmptyLikeOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenEmptyLikeOp op,
+                                PatternRewriter &rewriter) const override {
+    auto sizeListType =
+        Torch::ListType::get(Torch::IntType::get(op.getContext()));
+    Value sizeList =
+        rewriter.create<AtenSizeOp>(op.getLoc(), sizeListType, op.self());
+
+    // TODO: Handle the case when `dtype` is NoneType.
+    Type dtype = op.dtype().getType();
+    if (dtype.isa<OptionalType>() || dtype.isa<Torch::NoneType>() ||
+        dtype.isa<mlir::NoneType>())
+      return rewriter.notifyMatchFailure(
+          op, "unimplemented: None dtype is not supported");
+
+    rewriter.replaceOpWithNewOp<AtenEmptyMemoryFormatOp>(
+        op, op.getType(), sizeList, op.dtype(), op.layout(), op.device(),
+        op.pin_memory(), op.memory_format());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// The `aten.arange` op is converted to `aten.arange.start_step` op.
+class DecomposeAtenArangeOp : public OpRewritePattern<AtenArangeOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenArangeOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    // The AtenArangeOp doesn't have a start and step value. Therefore we set
+    // them as default values 0 and 1, respectively.
+    Value start, step;
+    start = rewriter.create<Torch::ConstantIntOp>(
+        loc, rewriter.getI64IntegerAttr(0));
+    step = rewriter.create<Torch::ConstantIntOp>(loc,
+                                                 rewriter.getI64IntegerAttr(1));
+    rewriter.replaceOpWithNewOp<AtenArangeStartStepOp>(
+        op, op.getType(), start, op.end(), step, op.dtype(), op.layout(),
+        op.device(), op.pin_memory());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// The `aten.arange.start` op is converted to `aten.arange.start_step` op.
+class DecomposeAtenArangeStartOp : public OpRewritePattern<AtenArangeStartOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenArangeStartOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    // The AtenArangeStartOp doesn't have a step value. Therefore we set it as
+    // default value 1.
+    Value step;
+    step = rewriter.create<Torch::ConstantIntOp>(loc,
+                                                 rewriter.getI64IntegerAttr(1));
+    rewriter.replaceOpWithNewOp<AtenArangeStartStepOp>(
+        op, op.getType(), op.start(), op.end(), step, op.dtype(), op.layout(),
+        op.device(), op.pin_memory());
+    return success();
+  }
+};
 } // namespace
 
 namespace {
@@ -494,6 +620,8 @@ class DecomposeComplexOpsPass
     target.addIllegalOp<Aten_SoftmaxOp>();
     patterns.add<DecomposeAtenLogSoftmaxIntOp>(context);
     target.addIllegalOp<AtenLogSoftmaxIntOp>();
+    patterns.add<DecomposeAtenEmptyLikeOp>(context);
+    target.addIllegalOp<AtenEmptyLikeOp>();
     patterns.add<DecomposeAtenExpandOp>(context);
     target.addIllegalOp<AtenExpandOp>();
     patterns.add<DecomposeAtenSizeOp>(context);
@@ -509,6 +637,8 @@ class DecomposeComplexOpsPass
     patterns.add<DecomposeAtenSelectIntOp>(context);
     target.addIllegalOp<AtenSelectIntOp>();
     patterns.add<DecomposeAtenMatmulOp>(context);
+    target.addIllegalOp<AtenTOp>();
+    patterns.add<DecomposeAtenTOp>(context);
     patterns.add<DecomposeAten_LogSoftmaxBackwardDataOp>(context);
     target.addIllegalOp<Aten_LogSoftmaxBackwardDataOp>();
     target.addDynamicallyLegalOp<AtenMatmulOp>([](AtenMatmulOp op) {
@@ -522,6 +652,13 @@ class DecomposeComplexOpsPass
     target.addIllegalOp<AtenAddcmulOp>();
     patterns.add<DecomposeAtenAddCLikeOp<AtenAddcdivOp, AtenDivTensorOp>>(context);
     target.addIllegalOp<AtenAddcdivOp>();
+    target.addIllegalOp<AtenLayerNormOp>();
+    patterns.add<DecomposeAtenLayerNormOp>(context);
+    patterns.add<DecomposeAtenArangeOp>(context);
+    target.addIllegalOp<AtenArangeOp>();
+    patterns.add<DecomposeAtenArangeStartOp>(context);
+    target.addIllegalOp<AtenArangeStartOp>();
+
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
       return signalPassFailure();
