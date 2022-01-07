@@ -104,30 +104,19 @@ public:
 } // namespace
 
 namespace {
-// for element-wise only
 class ConvertExternOp : public OpConversionPattern<ExternOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
   matchAndRewrite(ExternOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    op.emitRemark("in convert extern op");
     Location loc = op->getLoc();
     MLIRContext *context = op->getContext();
 
-    // get element type
-    Type elementType = mlir::FloatType::getF32(context);
-
-    // get rank
-    int64_t inputRank = 2;
-
-    // get operand number
-    int64_t operandNum = 3;
-
     // get function name
     StringAttr name = adaptor.name();
-    char *strName = (char *)name.data();
-    op->emitRemark("adaptor.name: ") << strName;
+    std::string nameStr = name.str();
+    char *strName = &nameStr[0];
     SmallVector<char *> nameParts;
     const char *delim = ".";
     char *p = strtok(strName, delim);
@@ -137,38 +126,23 @@ public:
     }
     mlir::StringAttr libraryCallAttr =
         ::mlir::StringAttr::get(context, nameParts.back());
-    op->emitRemark("library call attr: ") << libraryCallAttr;
 
-    // get inputs
     auto operands = adaptor.operands();
-    assert(operands.size() == operandNum && "Operand number error!");
-    Value input = operands[0];
-    //	  SmallVector<Value> inputs;
-    //    for (auto i : llvm::seq<int64_t>(0, operandNum))
-    //      inputs.push_back(operands[i]);
+    // get operand number
+    int64_t operandNum = operands.size();
 
-    // get result number
-    int64_t resultNum = 1;
+    // get result type
+    RankedTensorType resultType = getTypeConverter()
+                                      ->convertType(op->getResult(0).getType())
+                                      .cast<RankedTensorType>();
 
     // create type canonicalized memref operands
     SmallVector<Value, 4> callOperands;
-    callOperands.reserve(operands.size());
+    callOperands.reserve(operandNum);
 
     // inputs operands
     for (auto op : operands) {
-      //	  	auto tensorType = op.getType().dyn_cast<TensorType>();
-      //	  	if (!tensorType) {
-      //			  callOperands.push_back(op);
-      //	  		continue;
-      //	  	}
-      //	  	Value cast = rewriter.create<tensor::CastOp>(loc,
-      // tensorType, op); 		  callOperands.push_back(cast);
       callOperands.push_back(op);
-    }
-
-    op->emitRemark("call operands: ");
-    for (auto v : callOperands) {
-      v.dump();
     }
 
     // get function FuncOp
@@ -180,12 +154,10 @@ public:
       for (auto operand : operands) {
         auto operandType = operand.getType();
         inputTypes.push_back(operandType);
-        op->emitRemark("operandType");
-        operandType.dump();
       }
+
       // func output types
-      Type outputType = input.getType();
-      auto libFnType = rewriter.getFunctionType(inputTypes, outputType);
+      auto libFnType = rewriter.getFunctionType(inputTypes, resultType);
 
       OpBuilder::InsertionGuard guard(rewriter);
       // insert before module terminator.
@@ -194,13 +166,10 @@ public:
       FuncOp funcOp = rewriter.create<FuncOp>(loc, libraryCallAttr, libFnType);
       funcOp->setAttr("llvm.emit_c_interface", UnitAttr::get(op->getContext()));
       funcOp.setPrivate();
-      op->emitRemark("func op");
-      funcOp.dump();
     }
 
     rewriter.replaceOpWithNewOp<mlir::CallOp>(op, libraryCallAttr.getValue(),
-                                              input.getType(), callOperands);
-    op->emitRemark("convert extern success");
+                                              resultType, callOperands);
     return success();
   }
 };
