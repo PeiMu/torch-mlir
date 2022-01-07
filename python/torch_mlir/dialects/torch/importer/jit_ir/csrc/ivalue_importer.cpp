@@ -557,6 +557,7 @@ void IValueImporter::importCompilationUnit(torch::jit::CompilationUnit *cu) {
         std::vector<int64_t> shape(
             std::get<0>(annotator.getExterncallInfo(callName.str().substr(14))),
             static_cast<int64_t>(-1));
+//        std::vector<int64_t> shape = {2, 3};
         auto resultType = (*op->result_type_begin())
                               .dyn_cast<mlir::torch::Torch::BaseTensorType>();
         op->getResult(0).setType(resultType.getWithSizesAndDtype(

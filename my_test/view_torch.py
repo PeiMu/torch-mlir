@@ -11,39 +11,24 @@ from torch_mlir.passmanager import PassManager
 from torch_mlir_e2e_test.tosa_backends.linalg_on_tensors import LinalgOnTensorsTosaBackend
 from torch_mlir_e2e_test.linalg_on_tensors_backends.refbackend import RefBackendLinalgOnTensorsBackend
 
-externcall_info = {}
-
-
-def detect_type(func):
-    @wraps(func)
-    def wrapper(*args, **kw):
-        ret = func(*args, **kw)
-        externcall_info[func.__name__] = (ret.dim(), 0) # 0 means float, only support float for now
-        return ret
-    return wrapper
-
 
 class ExternCallModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-    @torch.jit.ignore
-    @detect_type
-    def external_function(self, in1, in2, in3):
-        return in1 + in2 + in3
-
     @export
     @annotate_args([
         None,
-        ([2, 3], torch.float32, True),
-        ([2, 3], torch.float32, True),
-        ([2, 3], torch.float32, True),
+        ([800, 1333, 3], torch.float32, True),
+        ([3], torch.float32, True),
+        ([3], torch.float32, True),
     ])
-    def forward(self, x, y, z):
-        x = x + y
-        tmp = self.external_function(x, y, z)
-        return tmp - z
-        # return self.external_function(x, y, z)
+    def forward(self, src, mean, scale):
+        # RGB to BGR
+        dup = src
+        dup[:,:,0] = src[:,:,2]
+        dup[:,:,2] = src[:,:,0]
+        return (dup - mean) * scale
 
 
 BACKEND = RefBackendLinalgOnTensorsBackend()
@@ -76,7 +61,7 @@ def compile_module(program: torch.nn.Module):
 
     ## Extract annotations.
     class_annotator = ClassAnnotator()
-    extract_annotations(program, scripted, class_annotator, externcall_info)
+    extract_annotations(program, scripted, class_annotator)
     print("-------------------------------class_annotator---------------------------")
     print(class_annotator)
 
@@ -121,8 +106,8 @@ if __name__ == '__main__':
     # Loads the compiled artifact into the runtime
     jit_module = BACKEND.load(compiled)
     # Run it!
-    x = torch.rand(2, 3).numpy()
-    y = torch.rand(2, 3).numpy()
-    z = torch.rand(2, 3).numpy()
+    x = torch.rand(800, 1333, 3).numpy()
+    y = torch.rand(3).numpy()
+    z = torch.rand(3).numpy()
     print("x: ", x, "\ny: ", y, "\nz: ", z)
     print("\n\n result: ", jit_module.forward(x, y, z))

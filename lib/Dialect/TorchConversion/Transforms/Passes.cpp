@@ -81,7 +81,7 @@ void TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(
   // Verify that we have lowered to the form that linalg on tensors backends
   // expect. This fails compilation (signalPassFailure) if the IR is not in the
   // correct form.
-  pm.addPass(TorchConversion::createVerifyLinalgOnTensorsBackendContractPass());
+//  pm.addPass(TorchConversion::createVerifyLinalgOnTensorsBackendContractPass());
 }
 
 void TorchConversion::createTorchBackendToTosaBackendPipeline(
