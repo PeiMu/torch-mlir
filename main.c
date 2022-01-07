@@ -14,19 +14,6 @@ typedef struct MemRef_descriptor_ {
   int64_t strides[2];
 } Memref;
 
-/*
-void _mlir_ciface_linalg_copy_viewsxsxf32_viewsxsxf32(Memref* input, Memref* output) {
-  printf("\nit is copy view\n");
-  for (size_t i = 0; i < 2; i++) {
-    for (size_t j = 0; j < 3; j++) {
-      printf("copy: input: %f\n", input->aligned[i*3+j]);
-      printf("copy: output: %f\n", output->aligned[i*3+j]);
-    }
-  }
-  return;
-}
-*/  
-
 float array[SIZE_0 * SIZE_1];
 
 void _mlir_ciface_external_function(Memref* output, Memref* input_1, Memref* input_2, Memref* input_3) {
@@ -57,7 +44,7 @@ void _mlir_ciface_external_function(Memref* output, Memref* input_1, Memref* inp
       output->aligned[i*SIZE_1+j] = input_2->aligned[i*SIZE_1+j] - input_1->aligned[i*SIZE_1+j];
       printf("%f\n", output->aligned[i*SIZE_1+j]);
 //      output->aligned[i*SIZE_1+j] = output->aligned[i*SIZE_1+j] + input_3->aligned[i*SIZE_1+j];
-      printf("%f\n", output->aligned[i*SIZE_1+j]);
+//      printf("%f\n", output->aligned[i*SIZE_1+j]);
     }
   }
   return;
