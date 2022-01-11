@@ -242,7 +242,7 @@ struct FinalizingBackendTypeConversionPass
       FinalizingBackendTypeConversionPass>::FinalizingBackendTypeConversionBase;
 
   void runOnOperation() override {
-	  auto *func = getOperation();
+    auto func = getOperation();
     auto *context = &getContext();
 
     TypeConverter typeConverter;
