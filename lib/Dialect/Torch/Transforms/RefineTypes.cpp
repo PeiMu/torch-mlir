@@ -941,8 +941,12 @@ ChangeResult TypeAnalyzer::visitBinaryBroadcastingOp(
       ValueKnowledge::getNotNonePessimisticValueState(getContext());
   if (lhs.hasSizes && rhs.hasSizes) {
     knowledge.hasSizes = true;
-    knowledge.sizes.resize(std::max(lhs.sizes.size(), rhs.sizes.size()),
-                           kUnknownSize);
+    if (lhs.sizes.size() == rhs.sizes.size()) {
+      knowledge.sizes = lhs.sizes;
+    } else {
+      knowledge.sizes.resize(std::max(lhs.sizes.size(), rhs.sizes.size()),
+        kUnknownSize);
+    }
   }
 
   // The alpha in `aten.add.Tensor` and `aten.sub.Tensor` has to be lower type
@@ -963,7 +967,7 @@ ChangeResult TypeAnalyzer::visitBinaryBroadcastingComparisonOp(
     knowledge.sizes.resize(std::max(lhs.sizes.size(), rhs.sizes.size()),
                            kUnknownSize);
   }
-  knowledge.dtype = IntegerType::get(op->getContext(), 1); 
+  knowledge.dtype = IntegerType::get(op->getContext(), 1);
   return getLatticeElement(op->getResult(0)).join(knowledge);
 }
 
