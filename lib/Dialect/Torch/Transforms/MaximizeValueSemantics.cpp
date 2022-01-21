@@ -266,7 +266,7 @@ public:
                                      PatternRewriter &rewriter) const {
     // todo: we assume there's only one operand in the yieldOp
     Operation *defOp = yieldOp.getOperand(0).getDefiningOp();
-    llvm::errs() << "0 def op:\t";
+    llvm::errs() << "0 yield def op:\t";
     defOp->dump();
 
     SmallVector<Operation *> workList;
@@ -279,14 +279,14 @@ public:
         return failure();
 
       workPath.push_back(definer);
-      llvm::errs() << "0 definer in path:\t";
+      llvm::errs() << "0 yield definer in path:\t";
       definer->dump();
 
       // todo: it will segment fault if the definer's operand comes from
       // function's operand
       auto previousDefiner = definer->getOperand(0).getDefiningOp();
       workList.push_back(previousDefiner);
-      llvm::errs() << "0 previous definers:\n";
+      llvm::errs() << "0 yield previous definers:\n";
       for (Operation *u : workList) {
         u->dump();
       }
@@ -295,19 +295,21 @@ public:
     }
 
     // get the currently held value op
-    llvm::errs() << "the nearest user is:\t";
+    llvm::errs() << "0 yield the nearest user is:\t";
     rankedTensor.dump();
     Operation *HeldValueOp = rankedTensor.getOperand().getDefiningOp();
-    llvm::errs() << "the value handled op is:\t";
+    llvm::errs() << "0 yield the value handled op is:\t";
     HeldValueOp->dump();
     // get ranked vtensor type
     auto yieldType = HeldValueOp->getResult(0).getType();
-    llvm::errs() << "0 ranked tensor type:\t";
+    llvm::errs() << "0 yield ranked tensor type:\t";
     yieldType.dump();
     // todo: check if it's the same type with PrimIfOp
 
     // rewrite yieldOp's type with ranked vtensor
-    yieldOp.getResult(0).setType(yieldType);
+//    yieldOp.getResult(0).setType(yieldType);
+	  llvm::errs() << "\n0 yield op:\t";
+	  yieldOp.dump();
 
     // replace the CopyTOTensorOp with IfYieldOp
     rewriter.replaceOp(workPath.front(), HeldValueOp->getResult(0));
