@@ -3583,6 +3583,7 @@ public:
   LogicalResult
   matchAndRewrite(AtenIntTensorOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+  	op.emitRemark("-----------------in ConvertAtenIntTensorOp-----------------\n");
     if (failed(verifyLinalgCompatibleTypes(op, rewriter)))
       return failure();
     Value intTensor = adaptor.a();
@@ -3598,6 +3599,36 @@ public:
 };
 } // namespace
 
+namespace {
+class ConvertAtenBoolTensorOp : public OpConversionPattern<AtenBoolTensorOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(AtenBoolTensorOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+  	llvm::errs() << "-----------------in ConvertAtenBoolTensorOp-----------------\n";
+    if (failed(verifyLinalgCompatibleTypes(op, rewriter))) {
+      llvm::errs() << "verifyLinalgCompatibleTypes failed";
+      return failure();
+    }
+    Value boolTensor = adaptor.a();
+    llvm::errs() << "-----------------boolTensor-----------------:\t";
+    boolTensor.dump();
+    auto tensorType = boolTensor.getType().cast<RankedTensorType>();
+
+    llvm::errs() << "tensor rank:\t" << tensorType.getRank() << "\n";
+
+    if (tensorType.getRank() != 0) {
+      llvm::errs() << "invalid rank: the rank of the input tensor must be 0";
+      return rewriter.notifyMatchFailure(
+              op, "invalid rank: the rank of the input tensor must be 0");
+    }
+
+    rewriter.replaceOpWithNewOp<tensor::ExtractOp>(op, boolTensor);
+    return success();
+  }
+};
+} // namespace
 
 namespace {
 class ConvertAtenFill_ScalarOp : public OpConversionPattern<AtenFill_ScalarOp> {
@@ -4211,6 +4242,8 @@ public:
     patterns.add<ConvertAtenContiguousOp>(typeConverter, context);
     target.addIllegalOp<AtenIntTensorOp>();
     patterns.add<ConvertAtenIntTensorOp>(typeConverter, context);
+	  target.addIllegalOp<AtenBoolTensorOp>();
+	  patterns.add<ConvertAtenBoolTensorOp>(typeConverter, context);
     target.addIllegalOp<PrimNumToTensorScalarOp>();
     patterns.add<ConvertPrimNumToTensorScalarOp>(typeConverter, context);
     target.addIllegalOp<AtenDropoutOp>();

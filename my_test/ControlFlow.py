@@ -24,9 +24,11 @@ class ControlFlowTestModule(torch.nn.Module):
         None,
         ([2, 2], torch.float32, True),
         ([2, 2], torch.float32, True),
+        ([], torch.float32, True),
+        ([], torch.float32, True),
     ])
-    def forward(self, x, y):
-        if x == y:
+    def forward(self, x, y, a, b):
+        if a == b:
             x = x - y
         else:
             x = x + y
@@ -120,5 +122,5 @@ if __name__ == '__main__':
     x = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
     y = torch.tensor([[0.5, 0.6], [0.7, 0.8]])
     print("x: ", x, "\n\n", "y: ", y)
-    print("\n\n golden result: ", mlp_module.forward(x, y))
-    print("\n\n result: ", jit_module.forward(x.numpy(), y.numpy()))
+    print("\n\n golden result: ", mlp_module.forward(x, y, 3, 2))
+    print("\n\n result: ", jit_module.forward(x.numpy(), y.numpy(), 3, 2))
