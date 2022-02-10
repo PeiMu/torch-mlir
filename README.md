@@ -1,3 +1,9 @@
+# How to run the control-flow demo
+1. Check out the code and compile it as following.
+2. Run `python my_test/ControlFlow.py`. 
+
+Then you will find the torch-mlir can convert the pytorch code with control-flow correctly and smoothly!
+
 # torch-mlir
 
 The Torch-MLIR project aims to provide first class compiler support from the [PyTorch](https://pytorch.org) ecosystem to the MLIR ecosystem.
