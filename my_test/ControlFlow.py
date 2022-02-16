@@ -24,8 +24,8 @@ class ControlFlowTestModule(torch.nn.Module):
         None,
         ([2, 2], torch.float32, True),
         ([2, 2], torch.float32, True),
-        ([], torch.float32, True),
-        ([], torch.float32, True),
+        ([], torch.int32, True),
+        ([], torch.int32, True),
     ])
     def forward(self, x, y, a, b):
         if a == b:
@@ -40,7 +40,7 @@ class ControlFlowTestModule(torch.nn.Module):
     #         x = x - y
     #     return torch.add(x, y)
     # multi-output
-    # def forward(self, x, y):
+    # def forward(self, x, y ):
     #     while(x[0] > y[0]):
     #         x = x - y
     #     return torch.add(x, y)
@@ -121,6 +121,10 @@ if __name__ == '__main__':
     # Run it!
     x = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
     y = torch.tensor([[0.5, 0.6], [0.7, 0.8]])
+    a = torch.scalar_tensor(3)
+    b = torch.scalar_tensor(2)
     print("x: ", x, "\n\n", "y: ", y)
-    print("\n\n golden result: ", mlp_module.forward(x, y, 3, 2))
-    print("\n\n result: ", jit_module.forward(x.numpy(), y.numpy(), 3, 2))
+    print("\nx+2y = ")
+    print("\n\nresult: ", mlp_module.forward(x, y, a, b))
+    print("\n\nresult: ", jit_module.forward(x.numpy(), y.numpy(), a.numpy(),
+                                             b.numpy()))
