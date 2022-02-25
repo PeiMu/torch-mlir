@@ -28,33 +28,36 @@ class ControlFlowTestModule(torch.nn.Module):
         ([], torch.int32, True),
     ])
     def forward(self, x, y, a, b):
-        if a == b:
+        # if-control
+        # if a == b:
+        #     x = x - y
+        # else:
+        #     x = x + y
+        # return torch.add(x, y)
+        # for-loop
+        x = x + y
+        for i in range(5):
             x = x - y
-        else:
-            x = x + y
+        # t = torch.zeros(2, 2)
+        # for i in range(12):
+        #     for j in range(12):
+        #         # There could be many loops here, or if statements, etc.
+        #         t = t.t()
         return torch.add(x, y)
-    # def forward(self, x, y):
-    #     for i in range(1, 5):
-    #         # for i in range(1, 5):
-    #         # while(True):
-    #         x = x - y
-    #     return torch.add(x, y)
-    # multi-output
-    # def forward(self, x, y ):
-    #     while(x[0] > y[0]):
-    #         x = x - y
-    #     return torch.add(x, y)
+        # while-loop
+        # while(x[0] > y[0]):
+        #     x = x - y
+        # return torch.add(x, y)
 
-    # # multi-output
-    # def forward(self, x, y):
-    #     z = x + y
-    #     if x == y:
-    #         x = x - y
-    #         z = x + y
-    #     else:
-    #         x = x + y
-    #         z = x - y
-    #     return torch.add(x, z)
+        # # multi-output
+        # z = x + y
+        # if x == y:
+        #     x = x - y
+        #     z = x + y
+        # else:
+        #     x = x + y
+        #     z = x - y
+        # return torch.add(x, z)
 
 
 BACKEND = RefBackendLinalgOnTensorsBackend()
@@ -75,6 +78,8 @@ def compile_module(program: torch.nn.Module):
     print(scripted.graph)
     print("-------------------------------code-------------------------------")
     print(scripted.code)
+    print("-------------------------------_c-------------------------------")
+    print(scripted._c.code)
 
     ## Extract annotations.
     class_annotator = ClassAnnotator()
@@ -125,6 +130,6 @@ if __name__ == '__main__':
     b = torch.scalar_tensor(2)
     print("x: ", x, "\n\n", "y: ", y)
     print("\nx+2y = ")
-    print("\n\nresult: ", mlp_module.forward(x, y, a, b))
-    print("\n\nresult: ", jit_module.forward(x.numpy(), y.numpy(), a.numpy(),
+    print("\n\ngolden result: ", mlp_module.forward(x, y, a, b))
+    print("\n\ntorch-mlir result: ", jit_module.forward(x.numpy(), y.numpy(), a.numpy(),
                                              b.numpy()))
